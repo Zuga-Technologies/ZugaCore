@@ -1,0 +1,56 @@
+@layer base {
+  body {
+    @apply bg-surface-0 text-txt-primary font-sans antialiased;
+  }
+
+  /* Slim dark scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-surface-0;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-4 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-bdr-hover;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-surface-1 border border-bdr rounded-xl;
+    backdrop-filter: blur(12px);
+  }
+
+  .glow-accent {
+    box-shadow: 0 0 12px rgba(245, 158, 11, 0.2),
+                0 0 32px rgba(245, 158, 11, 0.08);
+  }
+
+  .btn-primary {
+    @apply px-5 py-2.5 bg-accent text-surface-0 font-semibold rounded-lg
+           transition-all duration-200
+           hover:bg-accent-bright hover:shadow-lg
+           active:scale-[0.98]
+           disabled:bg-surface-3 disabled:text-txt-muted disabled:cursor-not-allowed disabled:hover:shadow-none;
+  }
+
+  .input-field {
+    @apply w-full px-4 py-3 bg-surface-2 border border-bdr rounded-lg
+           text-txt-primary placeholder-txt-muted
+           transition-colors duration-200
+           focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30;
+  }
+}
+
+/* Shared transitions */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
