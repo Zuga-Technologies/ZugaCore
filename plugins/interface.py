@@ -4,12 +4,15 @@ from fastapi import APIRouter
 
 
 class StudioPlugin(ABC):
-    """The contract every studio must follow to plug into ZugaApp."""
+    """Embedded studio — runs inside ZugaApp, shares its database.
+
+    Use for feature studios like ZugaLife where the frontend IS the product.
+    """
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """Studio name, e.g. 'news', 'image', 'trading'."""
+        """Studio name, e.g. 'life', 'learn'."""
         ...
 
     @property
@@ -35,4 +38,44 @@ class StudioPlugin(ABC):
 
     async def on_shutdown(self) -> None:
         """Called when ZugaApp shuts down. Optional cleanup."""
+        pass
+
+
+class ProxyPlugin(ABC):
+    """Proxy studio — forwards requests to a standalone backend.
+
+    Use for studios that run their own backend 24/7 (like ZugaTrader).
+    ZugaApp becomes a pass-through window + remote control.
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Studio name, e.g. 'trader', 'operator'."""
+        ...
+
+    @property
+    @abstractmethod
+    def version(self) -> str:
+        """Studio version, e.g. '0.1.0'."""
+        ...
+
+    @property
+    @abstractmethod
+    def proxy_to(self) -> str:
+        """Base URL of the standalone backend, e.g. 'http://localhost:8002'."""
+        ...
+
+    @property
+    @abstractmethod
+    def prefix(self) -> str:
+        """API prefix to proxy, e.g. '/api/trader'."""
+        ...
+
+    async def on_startup(self) -> None:
+        """Called when ZugaApp starts. Use to verify standalone is reachable."""
+        pass
+
+    async def on_shutdown(self) -> None:
+        """Called when ZugaApp shuts down. Usually a no-op."""
         pass
