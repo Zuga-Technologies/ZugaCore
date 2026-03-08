@@ -43,6 +43,10 @@ export default {
           '0%, 100%': { boxShadow: '0 0 8px rgba(245, 158, 11, 0.3)' },
           '50%': { boxShadow: '0 0 20px rgba(245, 158, 11, 0.5)' },
         },
+        'dash-card-in': {
+          from: { opacity: '0', transform: 'translateY(12px) scale(0.98)' },
+          to: { opacity: '1', transform: 'translateY(0) scale(1)' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 0.3s ease-out',
