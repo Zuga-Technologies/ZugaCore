@@ -49,6 +49,53 @@
            transition-colors duration-200
            focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30;
   }
+
+  .tab-btn {
+    @apply px-4 py-2 text-sm font-medium text-txt-muted rounded-lg transition-colors
+           hover:text-txt-secondary hover:bg-surface-2;
+  }
+
+  .tab-btn-active {
+    @apply tab-btn text-accent bg-accent/10;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-full;
+  }
+
+  .badge-green {
+    @apply badge bg-emerald-500/15 text-emerald-400;
+  }
+
+  .badge-red {
+    @apply badge bg-red-500/15 text-red-400;
+  }
+
+  .badge-yellow {
+    @apply badge bg-amber-500/15 text-amber-400;
+  }
+
+  .badge-gray {
+    @apply badge bg-surface-3 text-txt-secondary;
+  }
+
+  .btn-sm {
+    @apply px-3 py-1.5 text-sm font-medium rounded-lg transition-all duration-200
+           active:scale-[0.98];
+  }
+
+  .btn-outline {
+    @apply btn-sm border border-bdr text-txt-secondary
+           hover:border-bdr-hover hover:text-txt-primary hover:bg-surface-2;
+  }
+
+  .btn-danger {
+    @apply btn-sm bg-red-500/15 text-red-400 hover:bg-red-500/25;
+  }
+
+  .btn-success {
+    @apply btn-sm bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25;
+  }
 }
 
 @layer utilities {
