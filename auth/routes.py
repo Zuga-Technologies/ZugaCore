@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -6,6 +8,13 @@ from core.auth.models import CurrentUser
 from core.auth.token_store import create_token, revoke_token
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+def _get_allowed_emails() -> set[str] | None:
+    """Return allowed emails from env, or None if unrestricted."""
+    raw = os.environ.get("ALLOWED_EMAILS", "").strip()
+    if not raw:
+        return None  # No restriction — dev mode
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
 class LoginRequest(BaseModel):
@@ -29,9 +38,13 @@ class UserResponse(BaseModel):
 async def login(body: LoginRequest) -> LoginResponse:
     """Create a session token for a user.
 
-    Dev mode: no password required. When we swap to Cognito,
-    this will verify credentials against AWS before issuing a token.
+    Dev mode: no password required. If ALLOWED_EMAILS is set,
+    only those emails can log in (beta invite list).
     """
+    allowed = _get_allowed_emails()
+    if allowed and body.email.strip().lower() not in allowed:
+        raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
+
     user = CurrentUser(id=body.email, email=body.email, role=body.role)
     token = await create_token(user)
 
