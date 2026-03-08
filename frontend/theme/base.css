@@ -20,8 +20,10 @@
 
 @layer components {
   .glass-card {
-    @apply bg-surface-1 border border-bdr rounded-xl;
-    backdrop-filter: blur(12px);
+    @apply border border-bdr rounded-xl;
+    background: rgba(17, 17, 17, 0.75);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
   }
 
   .glow-accent {
