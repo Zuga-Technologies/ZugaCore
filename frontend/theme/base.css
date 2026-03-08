@@ -79,6 +79,38 @@
     @apply badge bg-surface-3 text-txt-secondary;
   }
 
+  .badge-blue {
+    @apply badge bg-blue-500/15 text-blue-400;
+  }
+
+  .badge-purple {
+    @apply badge bg-purple-500/15 text-purple-400;
+  }
+
+  .badge-orange {
+    @apply badge bg-orange-500/15 text-orange-400;
+  }
+
+  .badge-cyan {
+    @apply badge bg-cyan-500/15 text-cyan-400;
+  }
+
+  .badge-bitcoin {
+    @apply badge bg-yellow-500/15 text-yellow-400;
+  }
+
+  .stat-card {
+    @apply bg-surface-1 border border-bdr rounded-xl px-5 py-4 flex flex-col gap-1;
+  }
+
+  .stat-label {
+    @apply text-xs font-medium text-txt-muted uppercase tracking-wider;
+  }
+
+  .stat-value {
+    @apply text-2xl font-bold text-txt-primary;
+  }
+
   .btn-sm {
     @apply px-3 py-1.5 text-sm font-medium rounded-lg transition-all duration-200
            active:scale-[0.98];
