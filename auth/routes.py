@@ -60,13 +60,10 @@ async def auth_config() -> AuthConfigResponse:
 
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest) -> LoginResponse:
-    """Dev-mode login — email only, no verification.
+    """Email login — always available as fallback for LAN access.
 
-    Disabled when AUTH_MODE=google.
+    Security relies on ALLOWED_EMAILS, not auth mode.
     """
-    if get_auth_mode() != "dev":
-        raise HTTPException(status_code=403, detail="Dev login is disabled — use Google Sign-In")
-
     allowed = _get_allowed_emails()
     if allowed and body.email.strip().lower() not in allowed:
         raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
