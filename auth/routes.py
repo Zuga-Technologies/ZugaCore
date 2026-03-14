@@ -186,8 +186,9 @@ async def forgot_password(body: ForgotPasswordRequest) -> MessageResponse:
     email = body.email.strip().lower()
 
     # Always return success — don't reveal whether email exists
+    # Also works for existing accounts without a password (migrated from dev mode)
     record = await get_user_by_email(email)
-    if record is not None and record.password_hash is not None:
+    if record is not None:
         from core.auth.email_token_store import create_email_token
         from core.auth.email_service import send_reset_email
         token = await create_email_token(email, "reset")
