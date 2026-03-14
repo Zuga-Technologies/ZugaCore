@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from sqlalchemy import String
+from sqlalchemy import Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database.base import Base, TimestampMixin
@@ -32,3 +32,5 @@ class UserRecord(Base, TimestampMixin):
     avatar_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     auth_provider: Mapped[str] = mapped_column(String(32), default="dev")
     role: Mapped[str] = mapped_column(String(32), default="user")
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)

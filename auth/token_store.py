@@ -91,3 +91,16 @@ async def revoke_token(token: str) -> None:
     async with aiosqlite.connect(_get_db_path()) as db:
         await db.execute("DELETE FROM auth_tokens WHERE token = ?", (token,))
         await db.commit()
+
+
+async def revoke_tokens_for_user(user_id: str) -> int:
+    """Revoke ALL tokens for a user (force logout everywhere).
+
+    Used after password reset to invalidate all existing sessions.
+    """
+    async with aiosqlite.connect(_get_db_path()) as db:
+        cursor = await db.execute(
+            "DELETE FROM auth_tokens WHERE user_id = ?", (user_id,)
+        )
+        await db.commit()
+        return cursor.rowcount

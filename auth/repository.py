@@ -23,7 +23,10 @@ async def upsert_user(
     avatar_url: str | None = None,
     auth_provider: str = "dev",
 ) -> UserRecord:
-    """Create or update a user record. Returns the user."""
+    """Create or update a user record. Returns the user.
+
+    Google users are auto-verified (trusted identity provider).
+    """
     async with get_session() as session:
         result = await session.execute(
             select(UserRecord).where(UserRecord.email == email)
@@ -31,6 +34,7 @@ async def upsert_user(
         user = result.scalar_one_or_none()
 
         role = "admin" if _is_admin_email(email) else "user"
+        auto_verify = auth_provider == "google"
 
         if user is None:
             user = UserRecord(
@@ -40,6 +44,7 @@ async def upsert_user(
                 avatar_url=avatar_url,
                 auth_provider=auth_provider,
                 role=role,
+                email_verified=auto_verify,
             )
             session.add(user)
         else:
@@ -49,6 +54,8 @@ async def upsert_user(
                 user.avatar_url = avatar_url
             user.auth_provider = auth_provider
             user.role = role
+            if auto_verify:
+                user.email_verified = True
 
         return user
 
@@ -60,3 +67,53 @@ async def get_user_by_email(email: str) -> UserRecord | None:
             select(UserRecord).where(UserRecord.email == email)
         )
         return result.scalar_one_or_none()
+
+
+async def create_user_with_password(
+    email: str,
+    password_hash: str,
+) -> UserRecord:
+    """Create a new password-based user. Raises ValueError if email exists."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.email == email)
+        )
+        if result.scalar_one_or_none() is not None:
+            raise ValueError("An account with this email already exists")
+
+        role = "admin" if _is_admin_email(email) else "user"
+        user = UserRecord(
+            id=str(uuid.uuid4()),
+            email=email,
+            auth_provider="password",
+            role=role,
+            password_hash=password_hash,
+            email_verified=False,
+        )
+        session.add(user)
+        return user
+
+
+async def set_password_hash(email: str, password_hash: str) -> None:
+    """Update a user's password hash."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.email == email)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise ValueError("User not found")
+        user.password_hash = password_hash
+        user.auth_provider = "password"
+
+
+async def set_email_verified(email: str) -> None:
+    """Mark a user's email as verified."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.email == email)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise ValueError("User not found")
+        user.email_verified = True

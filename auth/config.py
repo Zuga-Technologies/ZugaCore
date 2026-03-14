@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def get_auth_mode() -> str:
-    """Return 'dev' or 'google'."""
+    """Return 'dev', 'google', or 'password'."""
     return os.environ.get("AUTH_MODE", "dev").lower()
 
 

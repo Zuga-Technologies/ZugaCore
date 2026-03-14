@@ -41,6 +41,8 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  const message = ref<string | null>(null)
+
   async function login(email: string) {
     loading.value = true
     error.value = null
@@ -52,6 +54,106 @@ export const useAuthStore = defineStore('auth', () => {
       if (e instanceof ApiError) {
         const body = e.body as Record<string, string> | undefined
         error.value = body?.detail ?? `Login failed (${e.status})`
+      } else {
+        error.value = 'Network error — is the backend running?'
+      }
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function passwordLogin(email: string, password: string) {
+    loading.value = true
+    error.value = null
+    try {
+      const res = await api.post<LoginResponse>('/api/auth/password-login', { email, password })
+      setToken(res.token)
+      user.value = res.user
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = e.body as Record<string, string> | undefined
+        error.value = body?.detail ?? `Login failed (${e.status})`
+      } else {
+        error.value = 'Network error — is the backend running?'
+      }
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function register(email: string, password: string) {
+    loading.value = true
+    error.value = null
+    message.value = null
+    try {
+      const res = await api.post<{ message: string }>('/api/auth/register', { email, password })
+      message.value = res.message
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = e.body as Record<string, string> | undefined
+        error.value = body?.detail ?? `Registration failed (${e.status})`
+      } else {
+        error.value = 'Network error — is the backend running?'
+      }
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function forgotPassword(email: string) {
+    loading.value = true
+    error.value = null
+    message.value = null
+    try {
+      const res = await api.post<{ message: string }>('/api/auth/forgot-password', { email })
+      message.value = res.message
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = e.body as Record<string, string> | undefined
+        error.value = body?.detail ?? `Request failed (${e.status})`
+      } else {
+        error.value = 'Network error — is the backend running?'
+      }
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function resetPassword(token: string, password: string) {
+    loading.value = true
+    error.value = null
+    message.value = null
+    try {
+      const res = await api.post<{ message: string }>('/api/auth/reset-password', { token, password })
+      message.value = res.message
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = e.body as Record<string, string> | undefined
+        error.value = body?.detail ?? `Reset failed (${e.status})`
+      } else {
+        error.value = 'Network error — is the backend running?'
+      }
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function verifyEmail(token: string) {
+    loading.value = true
+    error.value = null
+    message.value = null
+    try {
+      const res = await api.post<{ message: string }>('/api/auth/verify-email', { token })
+      message.value = res.message
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = e.body as Record<string, string> | undefined
+        error.value = body?.detail ?? `Verification failed (${e.status})`
       } else {
         error.value = 'Network error — is the backend running?'
       }
@@ -104,8 +206,10 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   return {
-    user, loading, error, authConfig,
+    user, loading, error, message, authConfig,
     isAuthenticated, isAdmin, authMode, googleClientId,
-    fetchAuthConfig, login, loginWithGoogle, logout, checkAuth,
+    fetchAuthConfig, login, passwordLogin, register,
+    forgotPassword, resetPassword, verifyEmail,
+    loginWithGoogle, logout, checkAuth,
   }
 })
