@@ -1,11 +1,20 @@
 """User persistence — upsert and lookup by email."""
 
+import os
 import uuid
 
 from sqlalchemy import select
 
 from core.auth.models import UserRecord
 from core.database.session import get_session
+
+
+def _is_admin_email(email: str) -> bool:
+    """Check if email is in the ADMIN_EMAILS env var (comma-separated)."""
+    admin_emails = os.environ.get("ADMIN_EMAILS", "")
+    if not admin_emails:
+        return False
+    return email.lower() in [e.strip().lower() for e in admin_emails.split(",")]
 
 
 async def upsert_user(
@@ -21,6 +30,8 @@ async def upsert_user(
         )
         user = result.scalar_one_or_none()
 
+        role = "admin" if _is_admin_email(email) else "user"
+
         if user is None:
             user = UserRecord(
                 id=str(uuid.uuid4()),
@@ -28,6 +39,7 @@ async def upsert_user(
                 name=name,
                 avatar_url=avatar_url,
                 auth_provider=auth_provider,
+                role=role,
             )
             session.add(user)
         else:
@@ -36,6 +48,7 @@ async def upsert_user(
             if avatar_url is not None:
                 user.avatar_url = avatar_url
             user.auth_provider = auth_provider
+            user.role = role
 
         return user
 
