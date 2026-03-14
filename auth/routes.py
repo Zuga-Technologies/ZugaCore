@@ -192,12 +192,32 @@ async def forgot_password(body: ForgotPasswordRequest) -> MessageResponse:
         from core.auth.email_token_store import create_email_token
         from core.auth.email_service import send_reset_email
         token = await create_email_token(email, "reset")
-        import sys
-        print(f"[AUTH] Reset token created for {email}", flush=True)
-        print(f"[AUTH] Reset link: {os.environ.get('APP_BASE_URL', 'http://localhost:5173')}/reset-password?token={token}", flush=True, file=sys.stderr)
         await send_reset_email(email, token)
 
     return MessageResponse(message="If that email is registered, you'll receive a reset link.")
+
+
+# TEMPORARY — admin-only endpoint to get reset token directly (no email needed)
+# Remove after initial password setup
+@router.post("/admin-reset-token")
+async def admin_reset_token(body: ForgotPasswordRequest) -> dict:
+    """Return a reset token directly. ADMIN_EMAILS only. REMOVE after setup."""
+    email = body.email.strip().lower()
+
+    # Only allow for admin emails
+    admin_raw = os.environ.get("ADMIN_EMAILS", "")
+    admin_emails = {e.strip().lower() for e in admin_raw.split(",") if e.strip()}
+    if email not in admin_emails:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    record = await get_user_by_email(email)
+    if record is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    from core.auth.email_token_store import create_email_token
+    token = await create_email_token(email, "reset")
+    base = os.environ.get("APP_BASE_URL", "http://localhost:5173")
+    return {"reset_link": f"{base}/reset-password?token={token}"}
 
 
 @router.post("/reset-password", response_model=MessageResponse)
