@@ -22,38 +22,119 @@ def _get_from_address() -> str:
     return os.environ.get("EMAIL_FROM", "ZugaApp <noreply@zugabot.ai>")
 
 
+def _email_template(title: str, body: str, button_text: str, button_link: str, footer: str) -> str:
+    """Render a branded ZugaApp email with dark theme + amber accent."""
+    safe_link = html_lib.escape(button_link)
+    return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{html_lib.escape(title)}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;">
+    <tr>
+      <td align="center" style="padding:40px 20px;">
+        <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;width:100%;">
+
+          <!-- Logo -->
+          <tr>
+            <td align="center" style="padding-bottom:32px;">
+              <div style="width:48px;height:48px;border-radius:12px;background-color:rgba(245,158,11,0.12);display:inline-flex;align-items:center;justify-content:center;line-height:48px;text-align:center;">
+                <span style="font-size:22px;font-weight:700;color:#f59e0b;">Z</span>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Card -->
+          <tr>
+            <td style="background-color:#111111;border:1px solid #262626;border-radius:16px;padding:40px 36px;">
+
+              <!-- Title -->
+              <h1 style="margin:0 0 8px;font-size:22px;font-weight:600;color:#f5f5f5;text-align:center;">
+                {html_lib.escape(title)}
+              </h1>
+
+              <!-- Body -->
+              <p style="margin:0 0 28px;font-size:15px;line-height:1.6;color:#a3a3a3;text-align:center;">
+                {body}
+              </p>
+
+              <!-- Button -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="center">
+                    <a href="{safe_link}"
+                       style="display:inline-block;padding:12px 32px;background-color:#f59e0b;color:#0a0a0a;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">
+                      {html_lib.escape(button_text)}
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Expire notice -->
+              <p style="margin:24px 0 0;font-size:13px;color:#525252;text-align:center;">
+                {html_lib.escape(footer)}
+              </p>
+
+              <!-- Fallback link -->
+              <p style="margin:16px 0 0;font-size:12px;color:#525252;text-align:center;word-break:break-all;">
+                If the button doesn't work, copy this link:<br>
+                <a href="{safe_link}" style="color:#b45309;text-decoration:underline;">{safe_link}</a>
+              </p>
+
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td align="center" style="padding-top:24px;">
+              <p style="margin:0;font-size:12px;color:#525252;">
+                zugabot.ai
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+
 async def send_verification_email(email: str, token: str) -> None:
     """Send an email verification link."""
     base = _get_base_url()
-    safe_link = html_lib.escape(f"{base}/verify-email?token={token}")
+    link = f"{base}/verify-email?token={token}"
 
-    subject = "Verify your ZugaApp account"
-    html = (
-        "<h2>Welcome to ZugaApp</h2>"
-        "<p>Click the link below to verify your email address:</p>"
-        f'<p><a href="{safe_link}">Verify my email</a></p>'
-        "<p>This link expires in 24 hours.</p>"
-        "<p>If you didn't create an account, you can ignore this email.</p>"
+    html = _email_template(
+        title="Verify your email",
+        body="Welcome to ZugaApp. Tap the button below to verify your email address and activate your account.",
+        button_text="Verify my email",
+        button_link=link,
+        footer="This link expires in 24 hours. If you didn't create an account, you can ignore this email.",
     )
 
-    await _send(email, subject, html)
+    await _send(email, "Verify your ZugaApp account", html)
 
 
 async def send_reset_email(email: str, token: str) -> None:
     """Send a password reset link."""
     base = _get_base_url()
-    safe_link = html_lib.escape(f"{base}/reset-password?token={token}")
+    link = f"{base}/reset-password?token={token}"
 
-    subject = "Reset your ZugaApp password"
-    html = (
-        "<h2>Password Reset</h2>"
-        "<p>Click the link below to reset your password:</p>"
-        f'<p><a href="{safe_link}">Reset my password</a></p>'
-        "<p>This link expires in 1 hour.</p>"
-        "<p>If you didn't request this, you can ignore this email.</p>"
+    html = _email_template(
+        title="Reset your password",
+        body="We received a request to reset your ZugaApp password. Tap the button below to choose a new one.",
+        button_text="Reset my password",
+        button_link=link,
+        footer="This link expires in 1 hour. If you didn't request this, you can safely ignore this email.",
     )
 
-    await _send(email, subject, html)
+    await _send(email, "Reset your ZugaApp password", html)
 
 
 async def _send(to: str, subject: str, html: str) -> None:
