@@ -148,8 +148,12 @@ async def password_login(body: PasswordLoginRequest) -> LoginResponse:
     if not record.email_verified:
         raise HTTPException(status_code=403, detail="Please verify your email before logging in")
 
+    # Recalculate role on every login (ADMIN_EMAILS may have changed)
+    from core.auth.repository import _is_admin_email
+    role = "admin" if _is_admin_email(record.email) else record.role
+
     user = CurrentUser(
-        id=record.id, email=record.email, role=record.role,
+        id=record.id, email=record.email, role=role,
         name=record.name, avatar_url=record.avatar_url,
     )
     token = await create_token(user)
