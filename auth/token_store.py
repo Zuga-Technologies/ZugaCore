@@ -5,6 +5,7 @@ share tokens. Log in via ZugaApp, authenticated in ZugaLife, etc.
 """
 
 import logging
+import os
 import secrets
 import time
 
@@ -15,6 +16,9 @@ from core.auth.models import CurrentUser
 logger = logging.getLogger(__name__)
 
 _db_path: str | None = None
+
+# 30 days default, configurable via SESSION_TTL_DAYS env var
+SESSION_TTL = int(os.environ.get("SESSION_TTL_DAYS", "30")) * 86400
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -67,16 +71,23 @@ async def create_token(user: CurrentUser) -> str:
 
 
 async def lookup_token(token: str) -> CurrentUser | None:
-    """Look up a token and return the user, or None if invalid."""
+    """Look up a token and return the user, or None if expired/invalid."""
     async with aiosqlite.connect(_get_db_path()) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT user_id, email, role, name, avatar_url FROM auth_tokens WHERE token = ?",
+            "SELECT user_id, email, role, name, avatar_url, created_at FROM auth_tokens WHERE token = ?",
             (token,),
         )
         row = await cursor.fetchone()
         if row is None:
             return None
+
+        # Enforce TTL — expired tokens are auto-revoked
+        if time.time() - row["created_at"] > SESSION_TTL:
+            await db.execute("DELETE FROM auth_tokens WHERE token = ?", (token,))
+            await db.commit()
+            return None
+
         return CurrentUser(
             id=row["user_id"],
             email=row["email"],
@@ -91,6 +102,20 @@ async def revoke_token(token: str) -> None:
     async with aiosqlite.connect(_get_db_path()) as db:
         await db.execute("DELETE FROM auth_tokens WHERE token = ?", (token,))
         await db.commit()
+
+
+async def cleanup_expired_sessions() -> int:
+    """Remove all expired session tokens. Returns count deleted."""
+    cutoff = time.time() - SESSION_TTL
+    async with aiosqlite.connect(_get_db_path()) as db:
+        cursor = await db.execute(
+            "DELETE FROM auth_tokens WHERE created_at < ?", (cutoff,)
+        )
+        await db.commit()
+        count = cursor.rowcount
+        if count:
+            logger.info("Cleaned up %d expired session tokens", count)
+        return count
 
 
 async def revoke_tokens_for_user(user_id: str) -> int:
