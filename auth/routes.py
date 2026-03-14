@@ -192,6 +192,9 @@ async def forgot_password(body: ForgotPasswordRequest) -> MessageResponse:
         from core.auth.email_token_store import create_email_token
         from core.auth.email_service import send_reset_email
         token = await create_email_token(email, "reset")
+        import sys
+        print(f"[AUTH] Reset token created for {email}", flush=True)
+        print(f"[AUTH] Reset link: {os.environ.get('APP_BASE_URL', 'http://localhost:5173')}/reset-password?token={token}", flush=True, file=sys.stderr)
         await send_reset_email(email, token)
 
     return MessageResponse(message="If that email is registered, you'll receive a reset link.")
