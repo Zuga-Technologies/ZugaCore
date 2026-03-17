@@ -17,4 +17,6 @@ export interface StudioFrontendPlugin {
     /** Sort order in the nav bar — lower numbers appear first */
     order: number
   }
+  /** If true, only visible and accessible to admin users */
+  adminOnly?: boolean
 }
