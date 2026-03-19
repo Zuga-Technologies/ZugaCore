@@ -17,7 +17,11 @@ export class ApiError extends Error {
     public status: number,
     public body: unknown,
   ) {
-    super(`API error ${status}`)
+    const detail =
+      body && typeof body === 'object' && 'detail' in body
+        ? String((body as { detail: unknown }).detail)
+        : null
+    super(detail || `Request failed (${status})`)
     this.name = 'ApiError'
   }
 }
