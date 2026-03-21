@@ -1,0 +1,13 @@
+name: Trigger ZugaApp Deploy
+
+on:
+  push:
+    branches: [master, main]
+
+jobs:
+  notify-zugaapp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger ZugaApp redeploy
+        run: |
+          curl -X POST             -H "Accept: application/vnd.github.v3+json"             -H "Authorization: token ${{ secrets.DEPLOY_PAT }}"             https://api.github.com/repos/Zuga-Technologies/ZugaApp/dispatches             -d '{"event_type":"studio-updated","client_payload":{"studio":"core"}}'
