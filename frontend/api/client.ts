@@ -43,6 +43,14 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   })
 
   if (!res.ok) {
+    // Dead token → clean logout, redirect to login
+    if (res.status === 401 && token) {
+      clearToken()
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
+
     const text = await res.text()
     let parsed: unknown
     try {
