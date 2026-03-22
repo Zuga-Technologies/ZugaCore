@@ -34,3 +34,4 @@ class UserRecord(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(32), default="user")
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)

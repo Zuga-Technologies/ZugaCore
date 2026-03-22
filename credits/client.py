@@ -1,20 +1,20 @@
-"""Dual-mode credit client for studios.
+"""Dual-mode ZugaTokens client for studios.
 
-Provides a unified interface for credit tracking that works in both
+Provides a unified interface for token tracking that works in both
 embedded mode (shared DB with ZugaApp) and standalone mode (HTTP calls).
 
 Usage:
     from core.credits.client import get_credit_client
 
     client = get_credit_client()
-    if not await client.can_spend(user_id, email):
-        raise CreditBlockedError("No credits")
+    if not await client.can_spend(user_id, email, estimated_tokens=15):
+        raise InsufficientTokensError("Not enough ZugaTokens")
 
     response = await ai_call(...)
 
     await client.record_spend(
         user_id=user_id,
-        credits=dollars_to_credits(response.cost),
+        tokens=dollars_to_tokens(response.cost),
         cost_usd=response.cost,
         service="venice",
         model=response.model,
@@ -28,25 +28,38 @@ import os
 
 logger = logging.getLogger(__name__)
 
-DOLLARS_TO_CREDITS = 1000
+ZUGATOKENS_PER_DOLLAR = 100
 
 
+def _get_markup_multiplier() -> float:
+    try:
+        return float(os.environ.get("ZUGATOKEN_MARKUP", "3"))
+    except ValueError:
+        return 3.0
+
+
+def dollars_to_tokens(usd: float) -> float:
+    """Convert raw USD cost to ZugaTokens (with markup)."""
+    return usd * _get_markup_multiplier() * ZUGATOKENS_PER_DOLLAR
+
+
+# Legacy alias
 def dollars_to_credits(usd: float) -> float:
-    return usd * DOLLARS_TO_CREDITS
+    return usd * 1000
 
 
 class CreditClient(abc.ABC):
-    """Abstract credit client — same interface for all modes."""
+    """Abstract token client — same interface for all modes."""
 
     @abc.abstractmethod
-    async def can_spend(self, user_id: str, email: str, estimated_credits: float = 0) -> bool:
+    async def can_spend(self, user_id: str, email: str, estimated_tokens: float = 0) -> bool:
         ...
 
     @abc.abstractmethod
     async def record_spend(
         self,
         user_id: str,
-        credits: float,
+        tokens: float,
         cost_usd: float,
         service: str,
         reason: str,
@@ -57,19 +70,19 @@ class CreditClient(abc.ABC):
 
 
 class DirectCreditClient(CreditClient):
-    """Shared DB mode — writes directly to the credit ledger.
+    """Shared DB mode — uses token wallet directly.
 
     Used when running embedded inside ZugaApp (shared SQLite DB).
     """
 
-    async def can_spend(self, user_id: str, email: str, estimated_credits: float = 0) -> bool:
+    async def can_spend(self, user_id: str, email: str, estimated_tokens: float = 0) -> bool:
         from core.credits.manager import can_spend
-        return await can_spend(user_id, email, estimated_credits)
+        return await can_spend(user_id, email, estimated_tokens)
 
     async def record_spend(
         self,
         user_id: str,
-        credits: float,
+        tokens: float,
         cost_usd: float,
         service: str,
         reason: str,
@@ -79,7 +92,7 @@ class DirectCreditClient(CreditClient):
         from core.credits.manager import record_spend
         await record_spend(
             user_id=user_id,
-            credits=credits,
+            tokens=tokens,
             cost_usd=cost_usd,
             service=service,
             reason=reason,
@@ -89,7 +102,7 @@ class DirectCreditClient(CreditClient):
 
 
 class HttpCreditClient(CreditClient):
-    """HTTP mode — calls ZugaApp's credit API endpoints.
+    """HTTP mode — calls ZugaApp's token API endpoints.
 
     Used when running standalone (own process, own DB).
     """
@@ -98,14 +111,14 @@ class HttpCreditClient(CreditClient):
         self._base_url = base_url.rstrip("/")
         self._service_key = service_key
 
-    async def can_spend(self, user_id: str, email: str, estimated_credits: float = 0) -> bool:
+    async def can_spend(self, user_id: str, email: str, estimated_tokens: float = 0) -> bool:
         import httpx
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(
                     f"{self._base_url}/api/credits/can-spend",
-                    json={"user_id": user_id, "email": email, "estimated_credits": estimated_credits},
+                    json={"user_id": user_id, "email": email, "estimated_tokens": estimated_tokens},
                     headers=self._headers,
                 )
                 resp.raise_for_status()
@@ -117,7 +130,7 @@ class HttpCreditClient(CreditClient):
     async def record_spend(
         self,
         user_id: str,
-        credits: float,
+        tokens: float,
         cost_usd: float,
         service: str,
         reason: str,
@@ -132,7 +145,7 @@ class HttpCreditClient(CreditClient):
                     f"{self._base_url}/api/credits/report-spend",
                     json={
                         "user_id": user_id,
-                        "credits": credits,
+                        "tokens": tokens,
                         "cost_usd": cost_usd,
                         "service": service,
                         "reason": reason,
@@ -162,13 +175,13 @@ class NullCreditClient(CreditClient):
     Used when neither DB nor HTTP is available (pure dev mode).
     """
 
-    async def can_spend(self, user_id: str, email: str, estimated_credits: float = 0) -> bool:
+    async def can_spend(self, user_id: str, email: str, estimated_tokens: float = 0) -> bool:
         return True
 
     async def record_spend(
         self,
         user_id: str,
-        credits: float,
+        tokens: float,
         cost_usd: float,
         service: str,
         reason: str,
@@ -176,8 +189,8 @@ class NullCreditClient(CreditClient):
         metadata: dict | None = None,
     ) -> None:
         logger.info(
-            "[NullCredits] user=%s credits=%.1f ($%.4f) service=%s reason=%s",
-            user_id, credits, cost_usd, service, reason,
+            "[NullTokens] user=%s tokens=%.1f ($%.4f) service=%s reason=%s",
+            user_id, tokens, cost_usd, service, reason,
         )
 
 
@@ -187,7 +200,7 @@ _instance: CreditClient | None = None
 
 
 def get_credit_client() -> CreditClient:
-    """Auto-detect mode and return the appropriate credit client.
+    """Auto-detect mode and return the appropriate token client.
 
     Detection order:
     1. ZUGAAPP_CREDITS_URL set → HTTP mode
@@ -203,7 +216,7 @@ def get_credit_client() -> CreditClient:
     service_key = os.environ.get("STUDIO_SERVICE_KEY", "").strip()
 
     if credits_url:
-        logger.info("Credit client: HTTP mode → %s", credits_url)
+        logger.info("Token client: HTTP mode → %s", credits_url)
         _instance = HttpCreditClient(credits_url, service_key)
         return _instance
 
@@ -211,14 +224,14 @@ def get_credit_client() -> CreditClient:
     try:
         from core.database.session import _engine
         if _engine is not None:
-            logger.info("Credit client: Direct DB mode")
+            logger.info("Token client: Direct DB mode")
             _instance = DirectCreditClient()
             return _instance
     except (ImportError, AttributeError):
         pass
 
     # Fallback to null
-    logger.info("Credit client: Null mode (logging only)")
+    logger.info("Token client: Null mode (logging only)")
     _instance = NullCreditClient()
     return _instance
 

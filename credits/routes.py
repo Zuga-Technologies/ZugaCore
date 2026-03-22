@@ -1,4 +1,4 @@
-"""ZugaCredits API routes — usage tracking, admin views, and service-to-service reporting."""
+"""ZugaTokens API routes — balance, history, purchases, admin views, and S2S reporting."""
 
 import logging
 import os
@@ -8,33 +8,163 @@ from pydantic import BaseModel
 
 from core.auth.middleware import get_current_user, require_admin
 from core.auth.models import CurrentUser
-from core.credits.manager import can_spend, record_spend, get_usage, get_all_usage
+from core.credits.manager import (
+    add_purchased_tokens,
+    add_subscription_tokens,
+    can_spend,
+    get_all_usage,
+    get_balance,
+    get_transaction_history,
+    get_usage,
+    grant_tokens,
+    record_spend,
+)
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/credits", tags=["credits"])
+router = APIRouter(tags=["tokens"])
 
 
 # ── Service-to-service auth ─────────────────────────────────────────────
 
 def _verify_service_key(x_service_key: str = Header(alias="X-Service-Key")) -> str:
-    """Validate the shared service key for studio-to-ZugaApp credit calls."""
+    """Validate the shared service key for studio-to-ZugaApp token calls."""
     expected = os.environ.get("STUDIO_SERVICE_KEY", "").strip()
     if not expected or x_service_key != expected:
         raise HTTPException(status_code=403, detail="Invalid service key")
     return x_service_key
 
 
-# ── Service-to-service endpoints (for standalone studios) ────────────────
+# ── User-Facing Token Endpoints ──────────────────────────────────────────
+
+@router.get("/api/tokens/balance")
+async def my_balance(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Get your ZugaToken balance across all wallets."""
+    if user.is_admin:
+        balance = await get_balance(user.id)
+        balance["is_unlimited"] = True
+        return balance
+
+    balance = await get_balance(user.id)
+    balance["is_unlimited"] = False
+    return balance
+
+
+@router.get("/api/tokens/history")
+async def my_history(
+    limit: int = 50,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Get your recent token transaction history."""
+    transactions = await get_transaction_history(user.id, limit=limit)
+    return {"transactions": transactions}
+
+
+@router.get("/api/tokens/usage")
+async def my_usage(
+    days: int = 30,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Get your token usage summary (spend breakdown by service)."""
+    return await get_usage(user.id, days=days)
+
+
+# ── Legacy Credit Endpoints (backward compat) ───────────────────────────
+
+@router.get("/api/credits/usage")
+async def legacy_usage(
+    days: int = 30,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Legacy endpoint — returns usage in ZugaToken format now."""
+    usage = await get_usage(user.id, days=days)
+    # Map to old field names for TopNav compat until frontend is updated
+    return {
+        "user_id": usage["user_id"],
+        "period_days": usage["period_days"],
+        "total_credits": usage["total_tokens"],  # legacy field name
+        "total_usd": usage["total_usd"],
+        "total_calls": usage["total_calls"],
+        "by_service": usage["by_service"],
+    }
+
+
+@router.get("/api/credits/usage/all")
+async def legacy_all_usage(
+    days: int = 30,
+    user: CurrentUser = Depends(require_admin),
+) -> list[dict]:
+    """Legacy endpoint — admin usage view."""
+    return await get_all_usage(days=days)
+
+
+# ── Admin Token Endpoints ────────────────────────────────────────────────
+
+class GrantTokensRequest(BaseModel):
+    user_id: str
+    amount: float
+    reason: str = "admin_grant"
+
+
+@router.get("/api/admin/tokens/overview")
+async def admin_overview(
+    days: int = 30,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Admin: overview of token economy metrics."""
+    all_usage = await get_all_usage(days=days)
+    total_tokens = sum(u["total_tokens"] for u in all_usage)
+    total_usd = sum(u["total_usd"] for u in all_usage)
+    return {
+        "total_users": len(all_usage),
+        "total_tokens_spent": total_tokens,
+        "total_raw_cost_usd": total_usd,
+        "users": all_usage,
+    }
+
+
+@router.get("/api/admin/tokens/user/{user_id}")
+async def admin_user_detail(
+    user_id: str,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Admin: detailed token info for a specific user."""
+    balance = await get_balance(user_id)
+    usage = await get_usage(user_id, days=30)
+    transactions = await get_transaction_history(user_id, limit=100)
+    return {
+        "balance": balance,
+        "usage_30d": usage,
+        "recent_transactions": transactions,
+    }
+
+
+@router.post("/api/admin/tokens/grant")
+async def admin_grant(
+    body: GrantTokensRequest,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Admin: grant bonus tokens to a user."""
+    if body.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    if body.amount > 100_000:
+        raise HTTPException(status_code=400, detail="Grant amount too large (max 100k)")
+
+    result = await grant_tokens(body.user_id, body.amount, body.reason)
+    logger.info("Admin %s granted %s tokens to %s", user.email, body.amount, body.user_id)
+    return result
+
+
+# ── Service-to-Service Endpoints (for standalone studios) ────────────────
 
 class CanSpendRequest(BaseModel):
     user_id: str
     email: str
-    estimated_credits: float = 0
+    estimated_tokens: float = 0
 
 
 class ReportSpendRequest(BaseModel):
     user_id: str
-    credits: float
+    tokens: float
     cost_usd: float
     service: str
     reason: str
@@ -42,25 +172,28 @@ class ReportSpendRequest(BaseModel):
     metadata: dict | None = None
 
 
-@router.post("/can-spend")
+@router.post("/api/credits/can-spend")
 async def check_can_spend(
     body: CanSpendRequest,
     _key: str = Depends(_verify_service_key),
 ) -> dict:
-    """Check if a user can spend credits. Service-to-service only."""
-    allowed = await can_spend(body.user_id, body.email, body.estimated_credits)
-    return {"allowed": allowed}
+    """Check if a user can spend tokens. Service-to-service only."""
+    allowed = await can_spend(body.user_id, body.email, body.estimated_tokens)
+    if not allowed:
+        balance = await get_balance(body.user_id)
+        return {"allowed": False, "balance": balance}
+    return {"allowed": True}
 
 
-@router.post("/report-spend")
+@router.post("/api/credits/report-spend")
 async def report_spend(
     body: ReportSpendRequest,
     _key: str = Depends(_verify_service_key),
 ) -> dict:
-    """Record a credit spend from a standalone studio. Service-to-service only."""
+    """Record a token spend from a standalone studio. Service-to-service only."""
     await record_spend(
         user_id=body.user_id,
-        credits=body.credits,
+        tokens=body.tokens,
         cost_usd=body.cost_usd,
         service=body.service,
         reason=body.reason,
@@ -68,25 +201,7 @@ async def report_spend(
         metadata=body.metadata,
     )
     logger.info(
-        "Service spend reported: user=%s credits=%.1f service=%s reason=%s",
-        body.user_id, body.credits, body.service, body.reason,
+        "Service spend reported: user=%s tokens=%.1f service=%s reason=%s",
+        body.user_id, body.tokens, body.service, body.reason,
     )
     return {"recorded": True}
-
-
-@router.get("/usage")
-async def my_usage(
-    days: int = 30,
-    user: CurrentUser = Depends(get_current_user),
-) -> dict:
-    """Get your own credit usage summary."""
-    return await get_usage(user.id, days=days)
-
-
-@router.get("/usage/all")
-async def all_usage(
-    days: int = 30,
-    user: CurrentUser = Depends(require_admin),
-) -> list[dict]:
-    """Get credit usage for all users. Admin only."""
-    return await get_all_usage(days=days)
