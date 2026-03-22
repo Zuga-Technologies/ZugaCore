@@ -48,12 +48,33 @@ async def get_session() -> AsyncGenerator[AsyncSession]:
 
 
 async def init_db() -> None:
-    """Create all tables. Called once at startup."""
+    """Create all tables and add missing columns. Called once at startup."""
     from core.database.base import Base
 
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Auto-migrate: add columns that exist in models but not in DB
+        await conn.run_sync(_add_missing_columns, Base)
+
+
+def _add_missing_columns(conn, base) -> None:  # type: ignore[no-untyped-def]
+    """For each model, check if any mapped columns are missing from the DB and add them."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(conn)
+    for table_name, table in base.metadata.tables.items():
+        if not inspector.has_table(table_name):
+            continue
+        existing = {col["name"] for col in inspector.get_columns(table_name)}
+        for col in table.columns:
+            if col.name not in existing:
+                col_type = col.type.compile(conn.dialect)
+                default = "DEFAULT NULL" if col.nullable else ""
+                conn.execute(text(
+                    f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type} {default}"
+                ))
+                print(f"[init_db] Added column {table_name}.{col.name} ({col_type})")
 
 
 async def close_db() -> None:
