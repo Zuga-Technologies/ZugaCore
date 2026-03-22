@@ -395,6 +395,101 @@ async def grant_tokens(user_id: str, tokens: float, reason: str = "admin_grant")
     return {"tokens_granted": tokens, "new_total": total}
 
 
+# ── Test Tier Toggle ──────────────────────────────────────────────────
+
+TEST_EMAIL = "antwonthegr82@gmail.com"
+
+TIER_TOKEN_MAP = {
+    "free": 0,
+    "starter": 1500,
+    "plus": 4000,
+    "power": 10000,
+}
+
+
+async def set_test_tier(user_id: str, email: str, tier: str) -> dict:
+    """Toggle the test account between free/subscriber tiers.
+
+    Only works for the designated test email. Sets subscription tokens
+    and creates/updates the Subscription record to simulate real tier state.
+    """
+    from core.credits.models import Subscription
+
+    if email.lower() != TEST_EMAIL:
+        raise ValueError(f"set_test_tier is restricted to {TEST_EMAIL}")
+
+    if tier not in TIER_TOKEN_MAP:
+        raise ValueError(f"Invalid tier: {tier}. Must be one of {list(TIER_TOKEN_MAP.keys())}")
+
+    tokens_per_cycle = TIER_TOKEN_MAP[tier]
+
+    async with get_session() as session:
+        balance = await _get_or_create_balance(session, user_id)
+
+        # Look up existing subscription
+        result = await session.execute(
+            select(Subscription).where(Subscription.user_id == user_id)
+        )
+        sub = result.scalar_one_or_none()
+
+        if tier == "free":
+            # Clear subscription tokens, remove subscription record
+            balance.sub_tokens = 0
+            balance.sub_rollover = 0
+            balance.sub_rollover_exp = None
+            if sub:
+                await session.delete(sub)
+
+            session.add(TokenTransaction(
+                user_id=user_id,
+                type="grant",
+                amount=0,
+                source="subscription",
+                reason=f"test_tier_set:{tier}",
+                balance_after=balance.free_tokens + balance.purchased_tokens,
+            ))
+        else:
+            # Set subscription tokens to full cycle amount
+            balance.sub_tokens = tokens_per_cycle
+            balance.sub_rollover = 0
+            balance.sub_rollover_exp = None
+
+            now = datetime.now(timezone.utc)
+            if sub:
+                sub.tier = tier
+                sub.status = "active"
+                sub.tokens_per_cycle = tokens_per_cycle
+                sub.current_period_start = now
+                sub.current_period_end = now + timedelta(days=30)
+            else:
+                session.add(Subscription(
+                    user_id=user_id,
+                    tier=tier,
+                    status="active",
+                    tokens_per_cycle=tokens_per_cycle,
+                    current_period_start=now,
+                    current_period_end=now + timedelta(days=30),
+                ))
+
+            total = balance.free_tokens + balance.sub_tokens + balance.purchased_tokens
+            session.add(TokenTransaction(
+                user_id=user_id,
+                type="grant",
+                amount=tokens_per_cycle,
+                source="subscription",
+                reason=f"test_tier_set:{tier}",
+                balance_after=total,
+            ))
+
+    logger.info("Test tier set: user=%s email=%s tier=%s tokens=%s", user_id, email, tier, tokens_per_cycle)
+    return {
+        "email": email,
+        "tier": tier,
+        "sub_tokens": tokens_per_cycle,
+        "message": f"Test account set to '{tier}' tier",
+    }
+
+
 # ── Usage Queries ─────────────────────────────────────────────────────
 
 async def get_usage(user_id: str, days: int = 30) -> dict:

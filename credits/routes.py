@@ -18,6 +18,8 @@ from core.credits.manager import (
     get_usage,
     grant_tokens,
     record_spend,
+    set_test_tier,
+    TEST_EMAIL,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,6 +153,38 @@ async def admin_grant(
 
     result = await grant_tokens(body.user_id, body.amount, body.reason)
     logger.info("Admin %s granted %s tokens to %s", user.email, body.amount, body.user_id)
+    return result
+
+
+# ── Test Account Tier Toggle ─────────────────────────────────────────────
+
+class SetTestTierRequest(BaseModel):
+    user_id: str
+    email: str
+    tier: str  # "free", "starter", "plus", "power"
+
+
+@router.post("/api/admin/tokens/set-tier")
+async def admin_set_test_tier(
+    body: SetTestTierRequest,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Admin: toggle the test account between free/subscriber tiers.
+
+    Restricted to the designated test email only.
+    """
+    if body.email.lower() != TEST_EMAIL:
+        raise HTTPException(
+            status_code=403,
+            detail=f"This endpoint only works for the test account ({TEST_EMAIL})",
+        )
+
+    try:
+        result = await set_test_tier(body.user_id, body.email, body.tier)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    logger.info("Admin %s set test tier: %s → %s", user.email, body.email, body.tier)
     return result
 
 
