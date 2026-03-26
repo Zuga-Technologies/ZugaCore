@@ -15,6 +15,7 @@ from core.auth.repository import (
     upsert_user,
 )
 from core.auth.token_store import create_token, revoke_token, revoke_tokens_for_user
+from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -149,8 +150,19 @@ async def password_login(body: PasswordLoginRequest) -> LoginResponse:
         raise HTTPException(status_code=403, detail="Please verify your email before logging in")
 
     # Recalculate role on every login (ADMIN_EMAILS may have changed)
+    # Also persist to DB so queries/CLI show correct role
     from core.auth.repository import _is_admin_email
     role = "admin" if _is_admin_email(record.email) else record.role
+    if record.role != role:
+        async with get_session() as session:
+            from sqlalchemy import select
+            from core.auth.models import UserRecord
+            result = await session.execute(
+                select(UserRecord).where(UserRecord.id == record.id)
+            )
+            db_user = result.scalar_one_or_none()
+            if db_user:
+                db_user.role = role
 
     user = CurrentUser(
         id=record.id, email=record.email, role=role,

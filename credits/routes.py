@@ -353,3 +353,35 @@ async def cli_user_audit(
         "usage_30d": usage,
         "transactions": transactions,
     }
+
+
+@router.post("/api/cli/sync-roles")
+async def cli_sync_roles(
+    _key: str = Depends(_verify_service_key),
+) -> dict:
+    """CLI: Sync user roles from ADMIN_EMAILS env var to the users table.
+
+    Updates any user whose DB role doesn't match what ADMIN_EMAILS says.
+    """
+    from core.auth.models import UserRecord
+    from core.auth.repository import _is_admin_email
+    from core.database.session import get_session
+    from sqlalchemy import select
+
+    updated = []
+    async with get_session() as session:
+        result = await session.execute(select(UserRecord))
+        users = result.scalars().all()
+
+        for user in users:
+            expected_role = "admin" if _is_admin_email(user.email) else "user"
+            if user.role != expected_role:
+                old_role = user.role
+                user.role = expected_role
+                updated.append({
+                    "email": user.email,
+                    "old_role": old_role,
+                    "new_role": expected_role,
+                })
+
+    return {"updated": updated, "count": len(updated)}
