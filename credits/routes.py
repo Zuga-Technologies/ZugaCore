@@ -248,3 +248,108 @@ async def report_spend(
         body.user_id, body.tokens, body.service, body.reason,
     )
     return {"recorded": True}
+
+
+# ── CLI Admin Endpoints (service-key auth, no user session needed) ────────
+
+@router.get("/api/cli/users")
+async def cli_list_users(
+    _key: str = Depends(_verify_service_key),
+) -> dict:
+    """CLI: List all registered users with their roles and balances."""
+    from core.auth.models import UserRecord
+    from core.database.session import get_session
+    from sqlalchemy import select
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).order_by(UserRecord.created_at)
+        )
+        users = result.scalars().all()
+
+    user_list = []
+    for u in users:
+        balance = await get_balance(u.id)
+        user_list.append({
+            "id": u.id,
+            "name": u.name or "",
+            "email": u.email,
+            "role": u.role,
+            "balance": balance,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        })
+
+    return {"users": user_list, "count": len(user_list)}
+
+
+@router.get("/api/cli/usage")
+async def cli_usage_report(
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+    _key: str = Depends(_verify_service_key),
+) -> dict:
+    """CLI: Usage report across all users (AI calls, cost, tokens)."""
+    all_usage = await get_all_usage(days=days)
+
+    # Enrich with user names
+    from core.auth.models import UserRecord
+    from core.database.session import get_session
+    from sqlalchemy import select
+
+    async with get_session() as session:
+        result = await session.execute(select(UserRecord))
+        users = {u.id: u for u in result.scalars().all()}
+
+    enriched = []
+    for u in all_usage:
+        user = users.get(u["user_id"])
+        enriched.append({
+            **u,
+            "name": user.name if user else "",
+            "email": user.email if user else u["user_id"],
+        })
+
+    enriched.sort(key=lambda x: x["total_tokens"], reverse=True)
+    total_tokens = sum(u["total_tokens"] for u in enriched)
+    total_usd = sum(u["total_usd"] for u in enriched)
+
+    return {
+        "period_days": days,
+        "total_tokens": total_tokens,
+        "total_raw_cost_usd": round(total_usd, 4),
+        "users": enriched,
+    }
+
+
+@router.get("/api/cli/audit/{user_id}")
+async def cli_user_audit(
+    user_id: str,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    _key: str = Depends(_verify_service_key),
+) -> dict:
+    """CLI: Full audit trail for a specific user."""
+    balance = await get_balance(user_id)
+    usage = await get_usage(user_id, days=30)
+    transactions = await get_transaction_history(user_id, limit=limit)
+
+    # Get user info
+    from core.auth.models import UserRecord
+    from core.database.session import get_session
+    from sqlalchemy import select
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.id == user_id)
+        )
+        user = result.scalar_one_or_none()
+
+    return {
+        "user": {
+            "id": user_id,
+            "name": user.name if user else "",
+            "email": user.email if user else user_id,
+            "role": user.role if user else "unknown",
+        },
+        "balance": balance,
+        "usage_30d": usage,
+        "transactions": transactions,
+    }
