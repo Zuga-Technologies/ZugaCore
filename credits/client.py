@@ -155,7 +155,7 @@ class HttpCreditClient(CreditClient):
                     headers=self._headers,
                 )
         except Exception as e:
-            logger.warning("HTTP record_spend failed (spend NOT tracked): %s", e)
+            logger.error("HTTP record_spend failed (spend NOT tracked): %s", e)
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -166,7 +166,9 @@ class HttpCreditClient(CreditClient):
 
     @property
     def _fail_open(self) -> bool:
-        return os.environ.get("CREDIT_FAIL_MODE", "open") != "closed"
+        # Default CLOSED: if ZugaApp is unreachable, block AI calls rather
+        # than serving them for free. Set CREDIT_FAIL_MODE=open in dev only.
+        return os.environ.get("CREDIT_FAIL_MODE", "closed") == "open"
 
 
 class NullCreditClient(CreditClient):

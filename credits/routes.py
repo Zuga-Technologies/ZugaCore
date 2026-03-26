@@ -2,9 +2,10 @@
 
 import logging
 import os
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from core.auth.middleware import get_current_user, require_admin
 from core.auth.models import CurrentUser
@@ -53,7 +54,7 @@ async def my_balance(user: CurrentUser = Depends(get_current_user)) -> dict:
 
 @router.get("/api/tokens/history")
 async def my_history(
-    limit: int = 50,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict:
     """Get your recent token transaction history."""
@@ -63,7 +64,7 @@ async def my_history(
 
 @router.get("/api/tokens/usage")
 async def my_usage(
-    days: int = 30,
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict:
     """Get your token usage summary (spend breakdown by service)."""
@@ -74,7 +75,7 @@ async def my_usage(
 
 @router.get("/api/credits/usage")
 async def legacy_usage(
-    days: int = 30,
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict:
     """Legacy endpoint — returns usage in ZugaToken format now."""
@@ -92,7 +93,7 @@ async def legacy_usage(
 
 @router.get("/api/credits/usage/all")
 async def legacy_all_usage(
-    days: int = 30,
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
     user: CurrentUser = Depends(require_admin),
 ) -> list[dict]:
     """Legacy endpoint — admin usage view."""
@@ -102,14 +103,14 @@ async def legacy_all_usage(
 # ── Admin Token Endpoints ────────────────────────────────────────────────
 
 class GrantTokensRequest(BaseModel):
-    user_id: str
-    amount: float
-    reason: str = "admin_grant"
+    user_id: str = Field(max_length=255)
+    amount: float = Field(gt=0, le=100_000)
+    reason: str = Field(default="admin_grant", max_length=255)
 
 
 @router.get("/api/admin/tokens/overview")
 async def admin_overview(
-    days: int = 30,
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
     user: CurrentUser = Depends(require_admin),
 ) -> dict:
     """Admin: overview of token economy metrics."""
@@ -173,10 +174,10 @@ async def admin_set_test_tier(
 
     Restricted to the designated test email only.
     """
-    if body.email.lower() != TEST_EMAIL:
+    if not TEST_EMAIL or body.email.lower() != TEST_EMAIL.lower():
         raise HTTPException(
             status_code=403,
-            detail=f"This endpoint only works for the test account ({TEST_EMAIL})",
+            detail="This endpoint is restricted to the designated test account",
         )
 
     try:
@@ -191,18 +192,18 @@ async def admin_set_test_tier(
 # ── Service-to-Service Endpoints (for standalone studios) ────────────────
 
 class CanSpendRequest(BaseModel):
-    user_id: str
-    email: str
-    estimated_tokens: float = 0
+    user_id: str = Field(max_length=255)
+    email: str = Field(max_length=255)
+    estimated_tokens: float = Field(gt=0, description="Must be positive — callers must estimate cost")
 
 
 class ReportSpendRequest(BaseModel):
-    user_id: str
-    tokens: float
-    cost_usd: float
-    service: str
-    reason: str
-    model: str | None = None
+    user_id: str = Field(max_length=255)
+    tokens: float = Field(gt=0, le=100_000)
+    cost_usd: float = Field(ge=0, le=1000)
+    service: str = Field(max_length=64)
+    reason: str = Field(max_length=255)
+    model: str | None = Field(default=None, max_length=128)
     metadata: dict | None = None
 
 
@@ -225,6 +226,14 @@ async def report_spend(
     _key: str = Depends(_verify_service_key),
 ) -> dict:
     """Record a token spend from a standalone studio. Service-to-service only."""
+    # Cap metadata size to prevent storage amplification
+    import json as _json
+    meta = body.metadata
+    if meta:
+        serialized = _json.dumps(meta)
+        if len(serialized) > 4096:
+            meta = {"truncated": True, "original_keys": list(meta.keys())[:20]}
+
     await record_spend(
         user_id=body.user_id,
         tokens=body.tokens,
@@ -232,7 +241,7 @@ async def report_spend(
         service=body.service,
         reason=body.reason,
         model=body.model,
-        metadata=body.metadata,
+        metadata=meta,
     )
     logger.info(
         "Service spend reported: user=%s tokens=%.1f service=%s reason=%s",

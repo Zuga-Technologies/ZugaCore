@@ -21,6 +21,7 @@ Usage:
     )
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -32,6 +33,18 @@ from core.credits.models import CreditLedger, TokenBalance, TokenTransaction
 from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
+
+# Per-user locks to prevent TOCTOU race conditions on token deduction.
+# Without this, concurrent requests for the same user can both pass
+# can_spend() and both deduct — draining the balance below zero.
+_user_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_user_lock(user_id: str) -> asyncio.Lock:
+    """Get or create a per-user asyncio lock."""
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
 
 # ── Constants ──────────────────────────────────────────────────────────
 
@@ -208,12 +221,25 @@ async def _deduct_tokens(session, balance: TokenBalance, tokens: float, reason: 
 async def can_spend(user_id: str, email: str, estimated_tokens: float = 0) -> bool:
     """Check if a user has enough ZugaTokens for an operation.
 
-    - Admins / unlimited emails: always True
+    - Admins / unlimited emails: always True (verified against stored email)
     - Others: check total wallet balance >= estimated_tokens
     - Also handles daily free token refill
+
+    WARNING: This is a non-atomic read. For spend operations, use try_spend()
+    which holds a per-user lock across check+deduct to prevent TOCTOU races.
     """
     if _is_unlimited(email):
-        return True
+        # Verify this email actually belongs to this user_id to prevent
+        # a caller from passing admin_email + victim_user_id
+        stored_email = await _get_user_email(user_id)
+        if stored_email and stored_email.lower() != email.lower():
+            logger.warning(
+                "Admin bypass rejected: provided email=%s doesn't match stored=%s for user=%s",
+                email, stored_email, user_id,
+            )
+            # Fall through to normal token check instead of granting unlimited
+        else:
+            return True
 
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
@@ -231,6 +257,127 @@ async def can_spend(user_id: str, email: str, estimated_tokens: float = 0) -> bo
             return total > 0
 
         return total >= estimated_tokens
+
+
+async def try_spend(
+    user_id: str,
+    email: str,
+    tokens: float,
+    cost_usd: float,
+    service: str,
+    reason: str,
+    model: str | None = None,
+    metadata: dict | None = None,
+) -> bool:
+    """Atomic check-and-deduct: prevents TOCTOU race conditions.
+
+    Holds a per-user lock, checks balance, deducts tokens, and writes
+    audit trail in a single operation. Returns True if spend succeeded,
+    False if insufficient tokens.
+
+    This is the PREFERRED way to spend tokens. Use this instead of
+    separate can_spend() + record_spend() calls.
+    """
+    # Admins bypass the gate but still get audited
+    if _is_unlimited(email):
+        stored_email = await _get_user_email(user_id)
+        if not stored_email or stored_email.lower() == email.lower():
+            # Admin confirmed — record spend for audit but don't deduct
+            await _record_admin_spend(user_id, tokens, cost_usd, service, reason, model, metadata)
+            return True
+
+    lock = _get_user_lock(user_id)
+    async with lock:
+        async with get_session() as session:
+            balance = await _get_or_create_balance(session, user_id)
+            await _maybe_refill_free_tokens(session, balance)
+
+            total = (
+                balance.free_tokens
+                + balance.sub_tokens
+                + balance.sub_rollover
+                + balance.purchased_tokens
+            )
+
+            if total < tokens:
+                return False
+
+            # Deduct tokens from wallets in priority order
+            deductions = await _deduct_tokens(session, balance, tokens, reason)
+
+            # Calculate total balance after deduction
+            total_after = (
+                balance.free_tokens + balance.sub_tokens
+                + balance.sub_rollover + balance.purchased_tokens
+            )
+
+            source_summary = ", ".join(f"{d['source']}={d['amount']:.1f}" for d in deductions)
+
+            # Write token transaction
+            session.add(TokenTransaction(
+                user_id=user_id,
+                type="spend",
+                amount=-tokens,
+                source=deductions[0]["source"] if deductions else "unknown",
+                reason=reason,
+                balance_after=total_after,
+            ))
+
+            # Write raw cost audit trail
+            markup = _get_markup_multiplier()
+            session.add(CreditLedger(
+                user_id=user_id,
+                amount=cost_usd * DOLLARS_TO_CREDITS,
+                cost_usd=cost_usd,
+                service=service,
+                model=model,
+                reason=reason,
+                metadata_json=json.dumps(metadata) if metadata else None,
+                tokens_charged=tokens,
+                markup_multiplier=markup,
+            ))
+
+        logger.debug(
+            "Token spend (atomic): user=%s tokens=%.1f ($%.4f) service=%s reason=%s [%s]",
+            user_id, tokens, cost_usd, service, reason, source_summary,
+        )
+        return True
+
+
+async def _record_admin_spend(
+    user_id: str, tokens: float, cost_usd: float,
+    service: str, reason: str, model: str | None, metadata: dict | None,
+) -> None:
+    """Record an admin's spend for audit purposes without deducting tokens."""
+    async with get_session() as session:
+        markup = _get_markup_multiplier()
+        session.add(CreditLedger(
+            user_id=user_id,
+            amount=cost_usd * DOLLARS_TO_CREDITS,
+            cost_usd=cost_usd,
+            service=service,
+            model=model,
+            reason=reason,
+            metadata_json=json.dumps(metadata) if metadata else None,
+            tokens_charged=tokens,
+            markup_multiplier=markup,
+        ))
+    logger.debug("Admin spend (audit only): user=%s tokens=%.1f ($%.4f)", user_id, tokens, cost_usd)
+
+
+async def _get_user_email(user_id: str) -> str | None:
+    """Look up the stored email for a user_id. Returns None if not found."""
+    try:
+        from core.auth.models import UserRecord
+        async with get_session() as session:
+            result = await session.execute(
+                select(UserRecord.email).where(UserRecord.id == user_id)
+            )
+            row = result.scalar_one_or_none()
+            return row
+    except Exception:
+        # If auth models aren't available (standalone studio), skip validation
+        return None
 
 
 async def get_balance(user_id: str) -> dict:
@@ -314,6 +461,8 @@ async def record_spend(
 
 async def add_purchased_tokens(user_id: str, tokens: float, stripe_id: str | None = None) -> dict:
     """Add purchased (top-up) tokens to a user's wallet. Called from Stripe webhook."""
+    if tokens <= 0:
+        raise ValueError(f"tokens must be positive, got {tokens}")
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
         balance.purchased_tokens += tokens
@@ -342,6 +491,8 @@ async def add_subscription_tokens(user_id: str, tokens: float, stripe_id: str | 
 
     Moves current sub_tokens to rollover (if any remaining), then sets new allocation.
     """
+    if tokens <= 0:
+        raise ValueError(f"tokens must be positive, got {tokens}")
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
 
@@ -373,6 +524,8 @@ async def add_subscription_tokens(user_id: str, tokens: float, stripe_id: str | 
 
 async def grant_tokens(user_id: str, tokens: float, reason: str = "admin_grant") -> dict:
     """Admin: grant bonus tokens to a user (added to purchased bucket)."""
+    if tokens <= 0:
+        raise ValueError(f"tokens must be positive, got {tokens}")
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
         balance.purchased_tokens += tokens
@@ -397,7 +550,7 @@ async def grant_tokens(user_id: str, tokens: float, reason: str = "admin_grant")
 
 # ── Test Tier Toggle ──────────────────────────────────────────────────
 
-TEST_EMAIL = "antwonthegr82@gmail.com"
+TEST_EMAIL = os.environ.get("ZUGATOKENS_TEST_EMAIL", "")
 
 TIER_TOKEN_MAP = {
     "free": 0,
@@ -415,8 +568,8 @@ async def set_test_tier(user_id: str, email: str, tier: str) -> dict:
     """
     from core.credits.models import Subscription
 
-    if email.lower() != TEST_EMAIL:
-        raise ValueError(f"set_test_tier is restricted to {TEST_EMAIL}")
+    if not TEST_EMAIL or email.lower() != TEST_EMAIL.lower():
+        raise ValueError("set_test_tier is restricted to the designated test account")
 
     if tier not in TIER_TOKEN_MAP:
         raise ValueError(f"Invalid tier: {tier}. Must be one of {list(TIER_TOKEN_MAP.keys())}")
