@@ -6,8 +6,8 @@ from pydantic import BaseModel
 
 from supertokens_python.recipe.emailpassword.asyncio import sign_up, sign_in
 from supertokens_python.recipe.emailpassword.interfaces import (
-    SignUpEmailAlreadyExistsError,
-    SignInWrongCredentialsError,
+    EmailAlreadyExistsError,
+    WrongCredentialsError,
 )
 from supertokens_python.recipe.session.asyncio import (
     create_new_session_without_request_response,
@@ -180,7 +180,7 @@ async def register(body: RegisterRequest) -> MessageResponse:
     _check_invite(email)
 
     result = await sign_up("public", email, body.password)
-    if isinstance(result, SignUpEmailAlreadyExistsError):
+    if isinstance(result, EmailAlreadyExistsError):
         raise HTTPException(status_code=409, detail="An account with this email already exists")
 
     st_user_id = result.user.id
@@ -202,7 +202,7 @@ async def password_login(body: PasswordLoginRequest) -> LoginResponse:
     email = body.email.strip().lower()
 
     result = await sign_in("public", email, body.password)
-    if isinstance(result, SignInWrongCredentialsError):
+    if isinstance(result, WrongCredentialsError):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     st_user_id = result.user.id
