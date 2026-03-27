@@ -97,13 +97,34 @@ def read_users(db_path: str) -> list[dict]:
     """Read all users from the app SQLite database."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, email, name, avatar_url, auth_provider, role, "
-        "password_hash, email_verified, supertokens_user_id "
-        "FROM users"
-    ).fetchall()
+
+    # Check if supertokens_user_id column exists
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
+    has_st_col = "supertokens_user_id" in cols
+
+    if has_st_col:
+        query = (
+            "SELECT id, email, name, avatar_url, auth_provider, role, "
+            "password_hash, email_verified, supertokens_user_id FROM users"
+        )
+    else:
+        query = (
+            "SELECT id, email, name, avatar_url, auth_provider, role, "
+            "password_hash, email_verified FROM users"
+        )
+
+    rows = conn.execute(query).fetchall()
+    users = [dict(row) for row in rows]
+
+    # Add the column if missing (so we can write back st_user_id later)
+    if not has_st_col:
+        conn.execute("ALTER TABLE users ADD COLUMN supertokens_user_id VARCHAR(255) DEFAULT NULL")
+        conn.commit()
+        for u in users:
+            u["supertokens_user_id"] = None
+
     conn.close()
-    return [dict(row) for row in rows]
+    return users
 
 
 def update_supertokens_id(db_path: str, email: str, st_user_id: str) -> None:
