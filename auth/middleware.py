@@ -14,7 +14,6 @@ async def get_current_user(request: Request) -> CurrentUser:
     authentication adds: user: CurrentUser = Depends(get_current_user)
     """
 
-    # Get the token from the Authorization header
     auth_header = request.headers.get("Authorization")
 
     if not auth_header:
@@ -25,7 +24,6 @@ async def get_current_user(request: Request) -> CurrentUser:
 
     token = auth_header.removeprefix("Bearer ")
 
-    # Validate the token and get the user
     user = await _validate_token(token)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -43,26 +41,9 @@ async def require_admin(user: CurrentUser = Depends(get_current_user)) -> Curren
 
 
 async def _validate_token(token: str) -> CurrentUser | None:
-    """Validate a token and return the user it belongs to.
-
-    Implementation is swapped via SUPERTOKENS_ENABLED feature flag:
-    - Off (default): SQLite token lookup (legacy)
-    - On: SuperTokens JWT verification (centralized auth)
-    """
-    from core.auth.config import get_supertokens_enabled
-
-    if get_supertokens_enabled():
-        return await _validate_token_supertokens(token)
-
-    from core.auth.token_store import lookup_token
-    return await lookup_token(token)
-
-
-async def _validate_token_supertokens(token: str) -> CurrentUser | None:
     """Verify a SuperTokens access token JWT and return the user.
 
-    Uses get_session_without_request_response() which validates the JWT
-    signature locally (no network call unless check_database=True).
+    Validates the JWT signature locally using cached JWKS (no network call).
     """
     try:
         from supertokens_python.recipe.session.asyncio import (
@@ -76,8 +57,8 @@ async def _validate_token_supertokens(token: str) -> CurrentUser | None:
         try:
             session = await get_session_without_request_response(
                 access_token=token,
-                anti_csrf_check=False,  # Not needed for header-based auth
-                check_database=False,   # Local JWT validation only (fast)
+                anti_csrf_check=False,
+                check_database=False,
             )
         except (UnauthorisedError, TryRefreshTokenError):
             return None
@@ -87,11 +68,9 @@ async def _validate_token_supertokens(token: str) -> CurrentUser | None:
 
         st_user_id = session.get_user_id()
 
-        # Look up the app-level user profile by SuperTokens user ID
         from core.auth.repository import get_user_by_supertokens_id, get_user_by_id
         record = await get_user_by_supertokens_id(st_user_id)
 
-        # Fallback: try matching by ID directly (for migrated users where IDs match)
         if record is None:
             record = await get_user_by_id(st_user_id)
 

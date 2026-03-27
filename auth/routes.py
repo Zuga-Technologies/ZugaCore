@@ -4,18 +4,41 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from core.auth.config import get_auth_mode, get_google_client_id, get_supertokens_enabled
+from supertokens_python.recipe.emailpassword.asyncio import sign_up, sign_in
+from supertokens_python.recipe.emailpassword.interfaces import (
+    SignUpEmailAlreadyExistsError,
+    SignInWrongCredentialsError,
+)
+from supertokens_python.recipe.session.asyncio import (
+    create_new_session_without_request_response,
+    get_session_without_request_response,
+    revoke_all_sessions_for_user,
+)
+from supertokens_python.recipe.thirdparty.asyncio import (
+    manually_create_or_update_user,
+)
+from supertokens_python.recipe.thirdparty.interfaces import (
+    ManuallyCreateOrUpdateUserOkResult,
+)
+from supertokens_python.types import RecipeUserId
+
+from core.auth.config import (
+    get_auth_mode,
+    get_apple_client_id,
+    get_github_client_id,
+    get_google_client_id,
+    get_google_client_secret,
+    get_microsoft_client_id,
+)
 from core.auth.middleware import get_current_user
 from core.auth.models import CurrentUser
 from core.auth.repository import (
-    create_user_with_password,
+    _is_admin_email,
     get_user_by_email,
     link_supertokens_id,
     set_email_verified,
-    set_password_hash,
     upsert_user,
 )
-from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +49,7 @@ def _get_allowed_emails() -> set[str] | None:
     """Return allowed emails from env, or None if unrestricted."""
     raw = os.environ.get("ALLOWED_EMAILS", "").strip()
     if not raw:
-        return None  # No restriction — dev mode
+        return None
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
@@ -66,9 +89,9 @@ class GoogleLoginRequest(BaseModel):
 
 class OAuthLoginRequest(BaseModel):
     """Universal OAuth login — provider sends auth code or credential."""
-    provider: str  # "google", "microsoft", "github", "apple"
-    code: str | None = None  # Authorization code (OAuth flow)
-    credential: str | None = None  # ID token (Google one-tap)
+    provider: str
+    code: str | None = None
+    credential: str | None = None
     redirect_uri: str | None = None
 
 
@@ -98,36 +121,32 @@ class AuthConfigResponse(BaseModel):
 
 # ── SuperTokens session helpers ────────────────────────────────────
 
-async def _create_st_session(user_id: str) -> str:
+async def _create_session(user_id: str) -> str:
     """Create a SuperTokens session and return the access token string."""
-    from supertokens_python.recipe.session.asyncio import (
-        create_new_session_without_request_response,
-    )
-    from supertokens_python.types import RecipeUserId
-
     session = await create_new_session_without_request_response(
         tenant_id="public",
         recipe_user_id=RecipeUserId(user_id),
         access_token_payload={},
         session_data_in_database={},
-        disable_anti_csrf=True,  # Header-based auth doesn't need CSRF
+        disable_anti_csrf=True,
     )
     tokens = session.get_all_session_tokens_dangerously()
     return tokens["accessToken"]
 
 
-async def _revoke_st_sessions(user_id: str) -> None:
-    """Revoke all SuperTokens sessions for a user."""
-    from supertokens_python.recipe.session.asyncio import revoke_all_sessions_for_user
-    await revoke_all_sessions_for_user(user_id)
-
-
-def _user_response_dict(user: CurrentUser) -> dict:
+def _user_dict(user: CurrentUser) -> dict:
     """Standard user dict for LoginResponse."""
     return {
         "id": user.id, "email": user.email, "role": user.role,
         "is_admin": user.is_admin, "name": user.name, "avatar_url": user.avatar_url,
     }
+
+
+def _check_invite(email: str) -> None:
+    """Raise 403 if invite-only mode and email not in list."""
+    allowed = _get_allowed_emails()
+    if allowed and email not in allowed:
+        raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
 
 
 # ── Endpoints ──────────────────────────────────────────────────────
@@ -138,20 +157,14 @@ async def auth_config() -> AuthConfigResponse:
     mode = get_auth_mode()
 
     providers: list[str] = []
-    if get_supertokens_enabled():
-        # Report configured OAuth providers
-        from core.auth.config import (
-            get_google_client_secret, get_microsoft_client_id,
-            get_github_client_id, get_apple_client_id,
-        )
-        if get_google_client_id() and get_google_client_secret():
-            providers.append("google")
-        if get_microsoft_client_id():
-            providers.append("microsoft")
-        if get_github_client_id():
-            providers.append("github")
-        if get_apple_client_id():
-            providers.append("apple")
+    if get_google_client_id() and get_google_client_secret():
+        providers.append("google")
+    if get_microsoft_client_id():
+        providers.append("microsoft")
+    if get_github_client_id():
+        providers.append("github")
+    if get_apple_client_id():
+        providers.append("apple")
 
     return AuthConfigResponse(
         auth_mode=mode,
@@ -162,126 +175,56 @@ async def auth_config() -> AuthConfigResponse:
 
 @router.post("/register", response_model=MessageResponse)
 async def register(body: RegisterRequest) -> MessageResponse:
-    """Create a new password-based account. Invite-only gate applies."""
+    """Create a new password-based account via SuperTokens."""
     email = body.email.strip().lower()
+    _check_invite(email)
 
-    # Invite-only gate
-    allowed = _get_allowed_emails()
-    if allowed and email not in allowed:
-        raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
+    result = await sign_up("public", email, body.password)
+    if isinstance(result, SignUpEmailAlreadyExistsError):
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
 
-    if get_supertokens_enabled():
-        # Register via SuperTokens EmailPassword recipe
-        from supertokens_python.recipe.emailpassword.asyncio import sign_up
-        from supertokens_python.recipe.emailpassword.interfaces import SignUpEmailAlreadyExistsError
+    st_user_id = result.user.id
+    await upsert_user(email=email, auth_provider="password")
+    await link_supertokens_id(email, st_user_id)
 
-        result = await sign_up("public", email, body.password)
-        if isinstance(result, SignUpEmailAlreadyExistsError):
-            raise HTTPException(status_code=409, detail="An account with this email already exists")
-
-        st_user_id = result.user.id
-
-        # Create app-level profile and link SuperTokens ID
-        from core.auth.repository import _is_admin_email
-        role = "admin" if _is_admin_email(email) else "user"
-        record = await upsert_user(email=email, auth_provider="password")
-        await link_supertokens_id(email, st_user_id)
-
-        # Send verification email via our Resend service
-        from core.auth.email_token_store import create_email_token
-        from core.auth.email_service import send_verification_email
-        token = await create_email_token(email, "verify")
-        await send_verification_email(email, token)
-    else:
-        # Legacy: bcrypt + SQLite
-        from core.auth.password import validate_password, hash_password
-        error = validate_password(body.password)
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-
-        try:
-            await create_user_with_password(email, hash_password(body.password))
-        except ValueError:
-            raise HTTPException(status_code=409, detail="An account with this email already exists")
-
-        from core.auth.email_token_store import create_email_token
-        from core.auth.email_service import send_verification_email
-        token = await create_email_token(email, "verify")
-        await send_verification_email(email, token)
+    # Send verification email
+    from core.auth.email_token_store import create_email_token
+    from core.auth.email_service import send_verification_email
+    token = await create_email_token(email, "verify")
+    await send_verification_email(email, token)
 
     return MessageResponse(message="Account created — check your email to verify.")
 
 
 @router.post("/password-login", response_model=LoginResponse)
 async def password_login(body: PasswordLoginRequest) -> LoginResponse:
-    """Login with email + password. Requires verified email."""
+    """Login with email + password via SuperTokens."""
     email = body.email.strip().lower()
 
-    if get_supertokens_enabled():
-        from supertokens_python.recipe.emailpassword.asyncio import sign_in
-        from supertokens_python.recipe.emailpassword.interfaces import SignInWrongCredentialsError
+    result = await sign_in("public", email, body.password)
+    if isinstance(result, SignInWrongCredentialsError):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
 
-        result = await sign_in("public", email, body.password)
-        if isinstance(result, SignInWrongCredentialsError):
-            raise HTTPException(status_code=401, detail="Invalid email or password")
+    st_user_id = result.user.id
 
-        st_user_id = result.user.id
+    # Check email verification
+    record = await get_user_by_email(email)
+    if record and not record.email_verified:
+        raise HTTPException(status_code=403, detail="Please verify your email before logging in")
 
-        # Check email verification in app DB
-        record = await get_user_by_email(email)
-        if record and not record.email_verified:
-            raise HTTPException(status_code=403, detail="Please verify your email before logging in")
+    # Ensure app profile exists and is linked
+    if record is None:
+        record = await upsert_user(email=email, auth_provider="password")
+    await link_supertokens_id(email, st_user_id)
 
-        # Ensure app profile exists and is linked
-        if record is None:
-            record = await upsert_user(email=email, auth_provider="password")
-        await link_supertokens_id(email, st_user_id)
+    role = "admin" if _is_admin_email(email) else record.role
+    user = CurrentUser(
+        id=record.id, email=record.email, role=role,
+        name=record.name, avatar_url=record.avatar_url,
+    )
+    token = await _create_session(st_user_id)
 
-        # Recalculate role
-        from core.auth.repository import _is_admin_email
-        role = "admin" if _is_admin_email(email) else record.role
-
-        user = CurrentUser(
-            id=record.id, email=record.email, role=role,
-            name=record.name, avatar_url=record.avatar_url,
-        )
-        token = await _create_st_session(st_user_id)
-    else:
-        # Legacy path
-        record = await get_user_by_email(email)
-
-        from core.auth.password import verify_password, DUMMY_HASH
-        if record is None or record.password_hash is None:
-            verify_password("dummy", DUMMY_HASH)
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-
-        if not verify_password(body.password, record.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-
-        if not record.email_verified:
-            raise HTTPException(status_code=403, detail="Please verify your email before logging in")
-
-        from core.auth.repository import _is_admin_email
-        role = "admin" if _is_admin_email(record.email) else record.role
-        if record.role != role:
-            async with get_session() as session:
-                from sqlalchemy import select
-                from core.auth.models import UserRecord
-                result = await session.execute(
-                    select(UserRecord).where(UserRecord.id == record.id)
-                )
-                db_user = result.scalar_one_or_none()
-                if db_user:
-                    db_user.role = role
-
-        user = CurrentUser(
-            id=record.id, email=record.email, role=role,
-            name=record.name, avatar_url=record.avatar_url,
-        )
-        from core.auth.token_store import create_token
-        token = await create_token(user)
-
-    return LoginResponse(token=token, user=_user_response_dict(user))
+    return LoginResponse(token=token, user=_user_dict(user))
 
 
 @router.post("/verify-email", response_model=MessageResponse)
@@ -320,39 +263,21 @@ async def forgot_password(body: ForgotPasswordRequest) -> MessageResponse:
 async def reset_password(body: ResetPasswordRequest) -> MessageResponse:
     """Consume a reset token and set a new password. Force-logs out all sessions."""
     from core.auth.email_token_store import consume_email_token
+    from supertokens_python.recipe.emailpassword.asyncio import update_email_or_password
 
     email = await consume_email_token(body.token, "reset")
     if email is None:
         raise HTTPException(status_code=400, detail="Invalid or expired reset link")
 
-    if get_supertokens_enabled():
-        from supertokens_python.recipe.emailpassword.asyncio import update_email_or_password
-        record = await get_user_by_email(email)
-        if record and record.supertokens_user_id:
-            await update_email_or_password(
-                recipe_user_id=record.supertokens_user_id,
-                password=body.password,
-            )
-            await _revoke_st_sessions(record.supertokens_user_id)
-        await set_email_verified(email)
-    else:
-        from core.auth.password import validate_password, hash_password
+    record = await get_user_by_email(email)
+    if record and record.supertokens_user_id:
+        await update_email_or_password(
+            recipe_user_id=record.supertokens_user_id,
+            password=body.password,
+        )
+        await revoke_all_sessions_for_user(record.supertokens_user_id)
 
-        error = validate_password(body.password)
-        if error:
-            raise HTTPException(status_code=400, detail=error)
-
-        try:
-            await set_password_hash(email, hash_password(body.password))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="User not found")
-
-        await set_email_verified(email)
-
-        record = await get_user_by_email(email)
-        if record:
-            from core.auth.token_store import revoke_tokens_for_user
-            await revoke_tokens_for_user(record.id)
+    await set_email_verified(email)
 
     return MessageResponse(message="Password reset — you can now log in with your new password.")
 
@@ -363,29 +288,21 @@ async def login(body: LoginRequest) -> LoginResponse:
     if get_auth_mode() == "password":
         raise HTTPException(status_code=403, detail="Email-only login is disabled — use password login")
 
-    allowed = _get_allowed_emails()
-    if allowed and body.email.strip().lower() not in allowed:
-        raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
+    _check_invite(body.email.strip().lower())
 
     record = await upsert_user(email=body.email, auth_provider="dev")
+
+    # Auto-register in SuperTokens for dev mode
+    if not record.supertokens_user_id:
+        st_result = await sign_up("public", record.email, "dev-mode-password")
+        st_id = st_result.user.id if hasattr(st_result, "user") else record.id
+        await link_supertokens_id(record.email, st_id)
+        record = await get_user_by_email(record.email)
+
     user = CurrentUser(id=record.id, email=record.email, role=record.role)
+    token = await _create_session(record.supertokens_user_id or record.id)
 
-    if get_supertokens_enabled():
-        # Dev mode with SuperTokens: create session directly
-        if not record.supertokens_user_id:
-            # Auto-register in SuperTokens for dev mode
-            from supertokens_python.recipe.emailpassword.asyncio import sign_up
-            result = await sign_up("public", record.email, "dev-mode-password")
-            st_id = result.user.id if hasattr(result, "user") else record.id
-            await link_supertokens_id(record.email, st_id)
-            record = await get_user_by_email(record.email)
-
-        token = await _create_st_session(record.supertokens_user_id or record.id)
-    else:
-        from core.auth.token_store import create_token
-        token = await create_token(user)
-
-    return LoginResponse(token=token, user=_user_response_dict(user))
+    return LoginResponse(token=token, user=_user_dict(user))
 
 
 @router.post("/google", response_model=LoginResponse)
@@ -398,16 +315,11 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
     if not client_id:
         raise HTTPException(status_code=500, detail="Google Client ID not configured")
 
-    # Verify the Google token (works for both legacy and SuperTokens paths)
     from core.auth.google import verify_google_token
     google_user = verify_google_token(body.credential, client_id)
 
-    # Check invite list
-    allowed = _get_allowed_emails()
-    if allowed and google_user["email"].lower() not in allowed:
-        raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
+    _check_invite(google_user["email"].lower())
 
-    # Persist user in DB (auto-verified)
     record = await upsert_user(
         email=google_user["email"],
         name=google_user.get("name"),
@@ -415,59 +327,35 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
         auth_provider="google",
     )
 
+    # Link in SuperTokens as ThirdParty user
+    st_result = await manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_user.get("sub", google_user["email"]),
+        email=google_user["email"],
+        is_verified=True,
+    )
+    if isinstance(st_result, ManuallyCreateOrUpdateUserOkResult):
+        await link_supertokens_id(record.email, st_result.user.id)
+        st_user_id = st_result.user.id
+    else:
+        st_user_id = record.supertokens_user_id or record.id
+
     user = CurrentUser(
         id=record.id, email=record.email, role=record.role,
         name=record.name, avatar_url=record.avatar_url,
     )
+    token = await _create_session(st_user_id)
 
-    if get_supertokens_enabled():
-        # Register/link in SuperTokens as ThirdParty user
-        from supertokens_python.recipe.thirdparty.asyncio import (
-            manually_create_or_update_user,
-        )
-        from supertokens_python.recipe.thirdparty.interfaces import (
-            ManuallyCreateOrUpdateUserOkResult,
-        )
-
-        st_result = await manually_create_or_update_user(
-            tenant_id="public",
-            third_party_id="google",
-            third_party_user_id=google_user.get("sub", google_user["email"]),
-            email=google_user["email"],
-            is_verified=True,
-        )
-        if isinstance(st_result, ManuallyCreateOrUpdateUserOkResult):
-            await link_supertokens_id(record.email, st_result.user.id)
-            token = await _create_st_session(st_result.user.id)
-        else:
-            # Fallback: create session with app user ID
-            token = await _create_st_session(record.id)
-    else:
-        from core.auth.token_store import create_token
-        token = await create_token(user)
-
-    return LoginResponse(token=token, user=_user_response_dict(user))
+    return LoginResponse(token=token, user=_user_dict(user))
 
 
 @router.post("/oauth", response_model=LoginResponse)
 async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
-    """Universal OAuth login for Microsoft, GitHub, Apple (SuperTokens only)."""
-    if not get_supertokens_enabled():
-        raise HTTPException(status_code=501, detail="OAuth login requires SuperTokens to be enabled")
-
+    """Universal OAuth login for Microsoft, GitHub, Apple."""
     if body.provider == "google" and body.credential:
-        # Redirect to existing Google handler
         return await google_login(GoogleLoginRequest(credential=body.credential))
 
-    from supertokens_python.recipe.thirdparty.asyncio import (
-        manually_create_or_update_user,
-    )
-    from supertokens_python.recipe.thirdparty.interfaces import (
-        ManuallyCreateOrUpdateUserOkResult,
-    )
-
-    # Exchange auth code for user info via SuperTokens provider
-    # The frontend handles the OAuth redirect and sends us the code
     from supertokens_python.recipe.thirdparty.asyncio import get_provider
     provider = await get_provider("public", body.provider)
     if provider is None:
@@ -476,7 +364,10 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
     # Exchange code for tokens and user info
     from supertokens_python.recipe.thirdparty.types import UserInfo
     tokens = await provider.exchange_auth_code_for_oauther_tokens(
-        redirect_uri_info={"redirectURIOnProviderDashboard": body.redirect_uri or "", "redirectURIQueryParams": {"code": body.code}},
+        redirect_uri_info={
+            "redirectURIOnProviderDashboard": body.redirect_uri or "",
+            "redirectURIQueryParams": {"code": body.code},
+        },
         user_context={},
     )
     user_info: UserInfo = await provider.get_user_info(tokens, user_context={})
@@ -485,13 +376,8 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
         raise HTTPException(status_code=400, detail="Could not get email from OAuth provider")
 
     email = user_info.email.id.lower()
+    _check_invite(email)
 
-    # Check invite list
-    allowed = _get_allowed_emails()
-    if allowed and email not in allowed:
-        raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
-
-    # Create/update in SuperTokens
     st_result = await manually_create_or_update_user(
         tenant_id="public",
         third_party_id=body.provider,
@@ -503,7 +389,6 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
     if not isinstance(st_result, ManuallyCreateOrUpdateUserOkResult):
         raise HTTPException(status_code=500, detail="Failed to create OAuth user")
 
-    # Persist app-level profile
     record = await upsert_user(
         email=email,
         name=getattr(user_info, "name", None),
@@ -516,34 +401,26 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
         id=record.id, email=record.email, role=record.role,
         name=record.name, avatar_url=record.avatar_url,
     )
-    token = await _create_st_session(st_result.user.id)
+    token = await _create_session(st_result.user.id)
 
-    return LoginResponse(token=token, user=_user_response_dict(user))
+    return LoginResponse(token=token, user=_user_dict(user))
 
 
 @router.post("/logout")
 async def logout(request: Request, user: CurrentUser = Depends(get_current_user)) -> dict:
-    """Revoke the current session token."""
+    """Revoke the current session."""
     token = request.headers["Authorization"].removeprefix("Bearer ").strip()
     if not token:
         raise HTTPException(status_code=400, detail="Missing token")
 
-    if get_supertokens_enabled():
-        # Revoke the SuperTokens session
-        try:
-            from supertokens_python.recipe.session.asyncio import (
-                get_session_without_request_response,
-            )
-            session = await get_session_without_request_response(
-                access_token=token, anti_csrf_check=False,
-            )
-            if session:
-                await session.revoke_session()
-        except Exception:
-            pass  # Token may already be expired
-    else:
-        from core.auth.token_store import revoke_token
-        await revoke_token(token)
+    try:
+        session = await get_session_without_request_response(
+            access_token=token, anti_csrf_check=False,
+        )
+        if session:
+            await session.revoke_session()
+    except Exception:
+        pass  # Token may already be expired
 
     return {"status": "logged_out"}
 
