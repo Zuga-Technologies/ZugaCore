@@ -42,9 +42,13 @@ def _email_template(title: str, body: str, button_text: str, button_link: str, f
           <!-- Logo -->
           <tr>
             <td align="center" style="padding-bottom:32px;">
-              <div style="width:48px;height:48px;border-radius:12px;background-color:rgba(245,158,11,0.12);display:inline-flex;align-items:center;justify-content:center;line-height:48px;text-align:center;">
-                <span style="font-size:22px;font-weight:700;color:#f59e0b;">Z</span>
-              </div>
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+                <tr>
+                  <td style="width:48px;height:48px;border-radius:12px;background-color:#2a1d08;text-align:center;vertical-align:middle;line-height:48px;font-size:22px;font-weight:700;color:#f59e0b;">
+                    Z
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
 
@@ -158,9 +162,6 @@ async def _send(to: str, subject: str, html: str) -> None:
 
     try:
         resend.Emails.send(params)
-        print(f"[EMAIL] Sent to {to}: {subject}")
+        logger.info("Email sent to %s: %s", to, subject)
     except Exception as exc:
-        # Resend fails if domain not verified — fall back to console
-        print(f"[EMAIL FALLBACK] Resend failed ({exc}), logging instead:")
-        print(f"[EMAIL FALLBACK] To: {to} | Subject: {subject}")
-        print(f"[EMAIL FALLBACK] HTML: {html}")
+        logger.error("Resend failed for %s: %s", to, exc)
