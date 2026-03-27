@@ -40,6 +40,13 @@ async def run_auth_migrations(db_path: str) -> None:
             )
             logger.info("Migration: added email_verified column to users")
 
+        # Add supertokens_user_id column to users table
+        if not await _column_exists(db, "users", "supertokens_user_id"):
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN supertokens_user_id VARCHAR(255) DEFAULT NULL"
+            )
+            logger.info("Migration: added supertokens_user_id column to users")
+
         await db.commit()
 
     logger.info("Auth migrations complete")

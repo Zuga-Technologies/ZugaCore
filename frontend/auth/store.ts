@@ -19,6 +19,7 @@ interface LoginResponse {
 interface AuthConfig {
   auth_mode: string
   google_client_id: string | null
+  providers: string[]
 }
 
 export const useAuthStore = defineStore('auth', () => {
@@ -31,13 +32,14 @@ export const useAuthStore = defineStore('auth', () => {
   const isAdmin = computed(() => user.value?.is_admin ?? false)
   const authMode = computed(() => authConfig.value?.auth_mode ?? 'dev')
   const googleClientId = computed(() => authConfig.value?.google_client_id ?? null)
+  const providers = computed(() => authConfig.value?.providers ?? [])
 
   async function fetchAuthConfig() {
     try {
       authConfig.value = await api.get<AuthConfig>('/api/auth/config')
     } catch {
       // Default to dev mode if config endpoint fails
-      authConfig.value = { auth_mode: 'dev', google_client_id: null }
+      authConfig.value = { auth_mode: 'dev', google_client_id: null, providers: [] }
     }
   }
 
@@ -183,6 +185,40 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  async function loginWithOAuth(provider: string, code: string, redirectUri?: string) {
+    loading.value = true
+    error.value = null
+    try {
+      const res = await api.post<LoginResponse>('/api/auth/oauth', {
+        provider, code, redirect_uri: redirectUri,
+      })
+      setToken(res.token)
+      user.value = res.user
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = e.body as Record<string, string> | undefined
+        error.value = body?.detail ?? `${provider} login failed (${e.status})`
+      } else {
+        error.value = 'Network error — is the backend running?'
+      }
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  function getOAuthUrl(provider: string): string {
+    const base = window.location.origin
+    const redirect = `${base}/auth/callback?provider=${provider}`
+    // Each provider has its own authorization URL pattern
+    const urls: Record<string, string> = {
+      microsoft: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${import.meta.env.VITE_MICROSOFT_CLIENT_ID || ''}&response_type=code&redirect_uri=${encodeURIComponent(redirect)}&scope=openid+email+profile`,
+      github: `https://github.com/login/oauth/authorize?client_id=${import.meta.env.VITE_GITHUB_CLIENT_ID || ''}&redirect_uri=${encodeURIComponent(redirect)}&scope=read:user+user:email`,
+      apple: `https://appleid.apple.com/auth/authorize?client_id=${import.meta.env.VITE_APPLE_CLIENT_ID || ''}&redirect_uri=${encodeURIComponent(redirect)}&response_type=code&scope=name+email&response_mode=form_post`,
+    }
+    return urls[provider] || ''
+  }
+
   async function logout() {
     try {
       await api.post('/api/auth/logout')
@@ -207,9 +243,10 @@ export const useAuthStore = defineStore('auth', () => {
 
   return {
     user, loading, error, message, authConfig,
-    isAuthenticated, isAdmin, authMode, googleClientId,
+    isAuthenticated, isAdmin, authMode, googleClientId, providers,
     fetchAuthConfig, login, passwordLogin, register,
     forgotPassword, resetPassword, verifyEmail,
-    loginWithGoogle, logout, checkAuth,
+    loginWithGoogle, loginWithOAuth, getOAuthUrl,
+    logout, checkAuth,
   }
 })

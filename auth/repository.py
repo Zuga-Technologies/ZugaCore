@@ -117,3 +117,32 @@ async def set_email_verified(email: str) -> None:
         if user is None:
             raise ValueError("User not found")
         user.email_verified = True
+
+
+async def get_user_by_supertokens_id(st_user_id: str) -> UserRecord | None:
+    """Look up a user by their SuperTokens user ID."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.supertokens_user_id == st_user_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_user_by_id(user_id: str) -> UserRecord | None:
+    """Look up a user by their app-level ID."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def link_supertokens_id(email: str, st_user_id: str) -> None:
+    """Link a SuperTokens user ID to an existing user record."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.email == email)
+        )
+        user = result.scalar_one_or_none()
+        if user is not None:
+            user.supertokens_user_id = st_user_id
