@@ -34,9 +34,11 @@ from core.auth.middleware import get_current_user
 from core.auth.models import CurrentUser
 from core.auth.repository import (
     _is_admin_email,
+    get_onboarding_state,
     get_user_by_email,
     link_supertokens_id,
     set_email_verified,
+    set_onboarding_state,
     upsert_user,
 )
 
@@ -436,3 +438,26 @@ async def me(user: CurrentUser = Depends(get_current_user)) -> UserResponse:
         name=user.name,
         avatar_url=user.avatar_url,
     )
+
+
+# ── Onboarding state ─────────────────────────────────────────────
+
+@router.get("/onboarding")
+async def get_onboarding(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Check if the user has completed app-level onboarding."""
+    completed = await get_onboarding_state(user.id)
+    return {"completed": completed}
+
+
+@router.post("/onboarding/complete")
+async def complete_onboarding(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Mark app-level onboarding as completed."""
+    await set_onboarding_state(user.id, True)
+    return {"status": "ok"}
+
+
+@router.post("/onboarding/reset")
+async def reset_onboarding(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Reset app-level onboarding so the user can replay it."""
+    await set_onboarding_state(user.id, False)
+    return {"status": "ok"}

@@ -38,16 +38,19 @@ SUBSCRIPTION_TIERS = {
     "starter": {
         "price_env": "STRIPE_PRICE_SUB_STARTER",
         "tokens": 1500,
+        "bonus_pct": 0.10,
         "label": "Starter — $5/mo",
     },
     "plus": {
         "price_env": "STRIPE_PRICE_SUB_PLUS",
         "tokens": 4000,
+        "bonus_pct": 0.15,
         "label": "Plus — $10/mo",
     },
     "power": {
         "price_env": "STRIPE_PRICE_SUB_POWER",
         "tokens": 10000,
+        "bonus_pct": 0.20,
         "label": "Power — $30/mo",
     },
 }
@@ -359,10 +362,13 @@ def get_available_plans() -> dict:
         if not price_id:
             continue
         price_cents = _fetch_stripe_price(price_id)
+        bonus_pct = info.get("bonus_pct", 0)
         subscription_tiers.append({
             "id": tier_id,
             "label": info["label"],
             "tokens_per_month": info["tokens"],
+            "bonus_pct": bonus_pct,
+            "bonus_tokens": int(info["tokens"] * bonus_pct) if bonus_pct else 0,
             "price_cents": price_cents,  # live from Stripe
         })
 

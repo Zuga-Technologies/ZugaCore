@@ -522,7 +522,12 @@ async def add_subscription_tokens(user_id: str, tokens: float, stripe_id: str | 
     return {"tokens_allocated": tokens, "new_total": total}
 
 
-async def grant_tokens(user_id: str, tokens: float, reason: str = "admin_grant") -> dict:
+async def grant_tokens(
+    user_id: str,
+    tokens: float,
+    reason: str = "admin_grant",
+    stripe_id: str | None = None,
+) -> dict:
     """Admin: grant bonus tokens to a user (added to purchased bucket)."""
     if tokens <= 0:
         raise ValueError(f"tokens must be positive, got {tokens}")
@@ -541,6 +546,7 @@ async def grant_tokens(user_id: str, tokens: float, reason: str = "admin_grant")
             amount=tokens,
             source="purchased",
             reason=reason,
+            stripe_id=stripe_id,
             balance_after=total,
         ))
 

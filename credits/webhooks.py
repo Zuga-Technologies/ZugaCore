@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 import stripe
 from fastapi import HTTPException, Request
 
-from core.credits.manager import add_purchased_tokens, add_subscription_tokens
+from core.credits.manager import add_purchased_tokens, add_subscription_tokens, grant_tokens
 from core.credits.stripe_service import (
     SUBSCRIPTION_TIERS,
     TOPUP_PACKS,
@@ -192,11 +192,24 @@ async def _activate_subscription(session: dict, metadata: dict) -> dict:
     # Credit first cycle tokens
     await add_subscription_tokens(user_id, tokens, stripe_id=stripe_sub_id)
 
+    # Signup bonus — goes into purchased bucket (never expires)
+    # Uses a derived stripe_id for idempotency so retries don't double-grant
+    bonus_pct = SUBSCRIPTION_TIERS[tier].get("bonus_pct", 0)
+    bonus_tokens = 0
+    if bonus_pct > 0:
+        bonus_tokens = int(tokens * bonus_pct)
+        bonus_stripe_id = f"bonus_{stripe_sub_id}" if stripe_sub_id else None
+        if not bonus_stripe_id or not await _already_processed(bonus_stripe_id, "grant"):
+            await grant_tokens(user_id, bonus_tokens, reason="subscription_bonus", stripe_id=bonus_stripe_id)
+            logger.info("Subscription bonus: user=%s bonus=%d", user_id, bonus_tokens)
+        else:
+            logger.info("Duplicate subscription bonus skipped: %s", bonus_stripe_id)
+
     logger.info(
-        "Subscription activated: user=%s tier=%s tokens=%d stripe_sub=%s",
-        user_id, tier, tokens, stripe_sub_id,
+        "Subscription activated: user=%s tier=%s tokens=%d bonus=%d stripe_sub=%s",
+        user_id, tier, tokens, bonus_tokens, stripe_sub_id,
     )
-    return {"status": "subscription_activated", "tier": tier, "tokens": tokens}
+    return {"status": "subscription_activated", "tier": tier, "tokens": tokens, "bonus": bonus_tokens}
 
 
 async def _credit_topup(session: dict, metadata: dict) -> dict:

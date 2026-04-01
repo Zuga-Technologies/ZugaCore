@@ -47,6 +47,13 @@ async def run_auth_migrations(db_path: str) -> None:
             )
             logger.info("Migration: added supertokens_user_id column to users")
 
+        # Add onboarding_completed column to users table
+        if not await _column_exists(db, "users", "onboarding_completed"):
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN onboarding_completed INTEGER DEFAULT 0"
+            )
+            logger.info("Migration: added onboarding_completed column to users")
+
         await db.commit()
 
     logger.info("Auth migrations complete")

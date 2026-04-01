@@ -35,3 +35,4 @@ class UserRecord(Base, TimestampMixin):
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     supertokens_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None, index=True)
+    onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False)

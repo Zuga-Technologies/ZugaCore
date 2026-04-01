@@ -146,3 +146,25 @@ async def link_supertokens_id(email: str, st_user_id: str) -> None:
         user = result.scalar_one_or_none()
         if user is not None:
             user.supertokens_user_id = st_user_id
+
+
+async def get_onboarding_state(user_id: str) -> bool:
+    """Return whether the user has completed app-level onboarding."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord.onboarding_completed).where(UserRecord.id == user_id)
+        )
+        value = result.scalar_one_or_none()
+        return bool(value)
+
+
+async def set_onboarding_state(user_id: str, completed: bool) -> None:
+    """Mark app-level onboarding as completed or reset it."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.id == user_id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise ValueError("User not found")
+        user.onboarding_completed = completed
