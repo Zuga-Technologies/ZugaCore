@@ -1,3 +1,18 @@
+// Token economics constants — must match ZugaCore/credits/manager.py
+const ZUGATOKENS_PER_DOLLAR = 100
+const MARKUP_MULTIPLIER = 3
+
+/** Convert raw USD cost to ZugaToken amount (with 3x markup). */
+export function dollarsToTokens(usd: number): number {
+  return Math.ceil(usd * MARKUP_MULTIPLIER * ZUGATOKENS_PER_DOLLAR)
+}
+
+/** Format a raw USD cost as a token display string, e.g. "15 tokens". */
+export function formatTokenCost(usd: number): string {
+  const tokens = dollarsToTokens(usd)
+  return `${tokens} token${tokens !== 1 ? 's' : ''}`
+}
+
 export const txTypeLabel: Record<string, string> = {
   spend: 'Used',
   purchase: 'Purchased',
