@@ -32,6 +32,11 @@ class StudioPlugin(ABC):
         """SQLAlchemy models this studio needs. Optional."""
         return []
 
+    @property
+    def admin_only(self) -> bool:
+        """If True, all routes require admin access. Override to restrict."""
+        return False
+
     async def on_startup(self) -> None:
         """Called when ZugaApp starts. Optional setup work."""
         pass
@@ -71,6 +76,11 @@ class ProxyPlugin(ABC):
     def prefix(self) -> str:
         """API prefix to proxy, e.g. '/api/trader'."""
         ...
+
+    @property
+    def admin_only(self) -> bool:
+        """If True, all proxied routes require admin access. Override to restrict."""
+        return False
 
     async def on_startup(self) -> None:
         """Called when ZugaApp starts. Use to verify standalone is reachable."""
