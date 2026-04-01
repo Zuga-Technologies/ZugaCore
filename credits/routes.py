@@ -1,10 +1,10 @@
-"""ZugaTokens API routes — balance, history, purchases, admin views, and S2S reporting."""
+"""ZugaTokens API routes — balance, history, purchases, Stripe checkout, admin views, and S2S reporting."""
 
 import logging
 import os
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from core.auth.middleware import get_current_user, require_admin
@@ -22,6 +22,14 @@ from core.credits.manager import (
     set_test_tier,
     TEST_EMAIL,
 )
+from core.credits.stripe_service import (
+    cancel_subscription,
+    create_checkout_subscription,
+    create_checkout_topup,
+    get_available_plans,
+    get_subscription_status,
+)
+from core.credits.webhooks import handle_stripe_webhook
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["tokens"])
@@ -69,6 +77,94 @@ async def my_usage(
 ) -> dict:
     """Get your token usage summary (spend breakdown by service)."""
     return await get_usage(user.id, days=days)
+
+
+# ── Stripe Purchase / Subscription Endpoints ──────────────────────────────
+
+
+def _app_url() -> str:
+    return os.environ.get("APP_URL", "http://localhost:5173")
+
+
+class PurchaseRequest(BaseModel):
+    pack: str = Field(max_length=32)
+
+
+class SubscribeRequest(BaseModel):
+    tier: str = Field(max_length=32)
+
+
+@router.get("/api/tokens/packs")
+async def list_packs(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """List available top-up packs and subscription tiers with live Stripe prices."""
+    return get_available_plans()
+
+
+@router.get("/api/tokens/subscription")
+async def my_subscription(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Get your current subscription status."""
+    status = await get_subscription_status(user.id)
+    if not status:
+        return {"subscribed": False}
+    return {
+        "subscribed": status["status"] in ("active", "cancelling"),
+        **status,
+    }
+
+
+@router.post("/api/tokens/purchase")
+async def purchase_topup(
+    body: PurchaseRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Create a Stripe Checkout session for a one-time token top-up."""
+    base = _app_url()
+    try:
+        checkout_url = await create_checkout_topup(
+            user_id=user.id,
+            email=user.email,
+            pack=body.pack,
+            success_url=f"{base}/tokens?purchase=success",
+            cancel_url=f"{base}/tokens?purchase=cancelled",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"checkout_url": checkout_url}
+
+
+@router.post("/api/tokens/subscribe")
+async def subscribe_tier(
+    body: SubscribeRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Create a Stripe Checkout session for a subscription."""
+    base = _app_url()
+    try:
+        checkout_url = await create_checkout_subscription(
+            user_id=user.id,
+            email=user.email,
+            tier=body.tier,
+            success_url=f"{base}/tokens?purchase=success",
+            cancel_url=f"{base}/tokens?purchase=cancelled",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"checkout_url": checkout_url}
+
+
+@router.post("/api/tokens/cancel-subscription")
+async def cancel_sub(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Cancel your subscription at the end of the current billing period."""
+    try:
+        return await cancel_subscription(user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/webhooks/stripe")
+async def stripe_webhook(request: Request) -> dict:
+    """Stripe webhook endpoint — verifies signature and processes events."""
+    return await handle_stripe_webhook(request)
 
 
 # ── Legacy Credit Endpoints (backward compat) ───────────────────────────
