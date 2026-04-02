@@ -378,12 +378,13 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
         raise HTTPException(status_code=400, detail=f"Provider '{body.provider}' not configured")
 
     # Exchange code for tokens and user info
+    from supertokens_python.recipe.thirdparty.provider import RedirectUriInfo
     from supertokens_python.recipe.thirdparty.types import UserInfo
     tokens = await provider.exchange_auth_code_for_oauth_tokens(
-        redirect_uri_info={
-            "redirectURIOnProviderDashboard": body.redirect_uri or "",
-            "redirectURIQueryParams": {"code": body.code},
-        },
+        redirect_uri_info=RedirectUriInfo(
+            redirect_uri_on_provider_dashboard=body.redirect_uri or "",
+            redirect_uri_query_params={"code": body.code},
+        ),
         user_context={},
     )
     user_info: UserInfo = await provider.get_user_info(tokens, user_context={})
