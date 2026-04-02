@@ -30,7 +30,7 @@ from core.auth.config import (
     get_google_client_secret,
     get_microsoft_client_id,
 )
-from core.auth.middleware import get_current_user
+from core.auth.middleware import get_current_user, require_admin
 from core.auth.models import CurrentUser
 from core.auth.repository import (
     _is_admin_email,
@@ -476,3 +476,34 @@ async def reset_onboarding(user: CurrentUser = Depends(get_current_user)) -> dic
     """Reset app-level onboarding so the user can replay it."""
     await set_onboarding_state(user.id, False)
     return {"status": "ok"}
+
+
+class AdminResetRequest(BaseModel):
+    email: str
+
+
+@router.post("/admin/reset-user")
+async def admin_reset_user(
+    body: AdminResetRequest,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Admin: reset a user's onboarding and role from ALLOWED_EMAILS."""
+    from core.auth.models import UserRecord
+    from core.database.session import get_session
+    from sqlalchemy import select
+
+    record = await get_user_by_email(body.email.strip().lower())
+    if record is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    new_role = "admin" if _is_admin_email(record.email) else "user"
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.id == record.id)
+        )
+        u = result.scalar_one()
+        u.role = new_role
+        u.onboarding_completed = False
+
+    return {"status": "ok", "email": record.email, "role": new_role, "onboarding_reset": True}
