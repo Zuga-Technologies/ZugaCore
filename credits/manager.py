@@ -62,10 +62,10 @@ def _get_markup_multiplier() -> float:
         return 3.0
 
 
-def _get_daily_free_tokens() -> float:
-    """Get daily free token allocation from env or default to 50."""
+def _get_welcome_tokens() -> float:
+    """Get one-time welcome token grant from env or default to 50."""
     try:
-        return float(os.environ.get("ZUGATOKEN_DAILY_FREE", "50"))
+        return float(os.environ.get("ZUGATOKEN_WELCOME_GRANT", "50"))
     except ValueError:
         return 50.0
 
@@ -121,42 +121,48 @@ def credits_to_dollars(credits: float) -> float:
 # ── Wallet Operations ────────────────────────────────────────────────
 
 async def _get_or_create_balance(session, user_id: str) -> TokenBalance:
-    """Get a user's token balance, creating it with daily free tokens if new."""
+    """Get a user's token balance, creating it with a one-time welcome grant if new."""
     result = await session.execute(
         select(TokenBalance).where(TokenBalance.user_id == user_id)
     )
     balance = result.scalar_one_or_none()
 
     if balance is None:
+        welcome = _get_welcome_tokens()
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         balance = TokenBalance(
             user_id=user_id,
-            free_tokens=_get_daily_free_tokens(),
+            free_tokens=welcome,
             free_tokens_date=today,
             sub_tokens=0,
             sub_rollover=0,
             purchased_tokens=0,
         )
         session.add(balance)
-        await session.flush()  # get ID without committing
-        logger.info("Created token balance for user %s with %s free tokens", user_id, _get_daily_free_tokens())
+        await session.flush()
+        logger.info("Created token balance for user %s with %s welcome tokens", user_id, welcome)
 
     return balance
 
 
 async def _maybe_refill_free_tokens(session, balance: TokenBalance) -> bool:
-    """Refill daily free tokens if the date has rolled over. Returns True if refilled."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """No-op — free tokens are now a one-time welcome grant, not daily.
 
+    Kept as a no-op so callers don't need to change.
+    Set ZUGATOKEN_DAILY_REFILL=true to re-enable daily refills if needed.
+    """
+    if os.environ.get("ZUGATOKEN_DAILY_REFILL", "").lower() not in ("true", "1"):
+        return False
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if balance.free_tokens_date == today:
         return False
 
     old_balance = balance.free_tokens
-    daily_amount = _get_daily_free_tokens()
+    daily_amount = _get_welcome_tokens()
     balance.free_tokens = daily_amount
     balance.free_tokens_date = today
 
-    # Log the refill transaction
     total = balance.free_tokens + balance.sub_tokens + balance.sub_rollover + balance.purchased_tokens
     session.add(TokenTransaction(
         user_id=balance.user_id,
