@@ -379,7 +379,7 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
 
     # Exchange code for tokens and user info
     from supertokens_python.recipe.thirdparty.types import UserInfo
-    tokens = await provider.exchange_auth_code_for_oauther_tokens(
+    tokens = await provider.exchange_auth_code_for_oauth_tokens(
         redirect_uri_info={
             "redirectURIOnProviderDashboard": body.redirect_uri or "",
             "redirectURIQueryParams": {"code": body.code},
