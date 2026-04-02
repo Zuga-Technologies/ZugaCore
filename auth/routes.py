@@ -118,6 +118,8 @@ class UserResponse(BaseModel):
 class AuthConfigResponse(BaseModel):
     auth_mode: str
     google_client_id: str | None = None
+    github_client_id: str | None = None
+    microsoft_client_id: str | None = None
     providers: list[str] = []
 
 
@@ -171,6 +173,8 @@ async def auth_config() -> AuthConfigResponse:
     return AuthConfigResponse(
         auth_mode=mode,
         google_client_id=get_google_client_id() if mode in ("google", "password") else None,
+        github_client_id=get_github_client_id() if "github" in providers else None,
+        microsoft_client_id=get_microsoft_client_id() if "microsoft" in providers else None,
         providers=providers,
     )
 

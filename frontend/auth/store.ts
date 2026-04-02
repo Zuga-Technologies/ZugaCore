@@ -19,6 +19,8 @@ interface LoginResponse {
 interface AuthConfig {
   auth_mode: string
   google_client_id: string | null
+  github_client_id: string | null
+  microsoft_client_id: string | null
   providers: string[]
 }
 
@@ -39,7 +41,7 @@ export const useAuthStore = defineStore('auth', () => {
       authConfig.value = await api.get<AuthConfig>('/api/auth/config')
     } catch {
       // Default to dev mode if config endpoint fails
-      authConfig.value = { auth_mode: 'dev', google_client_id: null, providers: [] }
+      authConfig.value = { auth_mode: 'dev', google_client_id: null, github_client_id: null, microsoft_client_id: null, providers: [] }
     }
   }
 
@@ -210,10 +212,11 @@ export const useAuthStore = defineStore('auth', () => {
   function getOAuthUrl(provider: string): string {
     const base = window.location.origin
     const redirect = `${base}/auth/callback?provider=${provider}`
-    // Each provider has its own authorization URL pattern
+    const cfg = authConfig.value
+    // Use server-provided client IDs (from /api/auth/config) instead of build-time VITE_ vars
     const urls: Record<string, string> = {
-      microsoft: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${import.meta.env.VITE_MICROSOFT_CLIENT_ID || ''}&response_type=code&redirect_uri=${encodeURIComponent(redirect)}&scope=openid+email+profile`,
-      github: `https://github.com/login/oauth/authorize?client_id=${import.meta.env.VITE_GITHUB_CLIENT_ID || ''}&redirect_uri=${encodeURIComponent(redirect)}&scope=read:user+user:email`,
+      microsoft: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${cfg?.microsoft_client_id || ''}&response_type=code&redirect_uri=${encodeURIComponent(redirect)}&scope=openid+email+profile`,
+      github: `https://github.com/login/oauth/authorize?client_id=${cfg?.github_client_id || ''}&redirect_uri=${encodeURIComponent(redirect)}&scope=read:user+user:email`,
       apple: `https://appleid.apple.com/auth/authorize?client_id=${import.meta.env.VITE_APPLE_CLIENT_ID || ''}&redirect_uri=${encodeURIComponent(redirect)}&response_type=code&scope=name+email&response_mode=form_post`,
     }
     return urls[provider] || ''
