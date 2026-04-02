@@ -9,12 +9,30 @@ from core.auth.models import UserRecord
 from core.database.session import get_session
 
 
+def _parse_allowed_emails() -> dict[str, str]:
+    """Parse ALLOWED_EMAILS into {email: role} map.
+
+    Format: 'email:admin,email2,email3:admin' — no suffix means 'user'.
+    """
+    raw = os.environ.get("ALLOWED_EMAILS", "").strip()
+    if not raw:
+        return {}
+    result = {}
+    for entry in raw.split(","):
+        entry = entry.strip().lower()
+        if not entry:
+            continue
+        if ":" in entry:
+            email, role = entry.rsplit(":", 1)
+            result[email.strip()] = role.strip()
+        else:
+            result[entry] = "user"
+    return result
+
+
 def _is_admin_email(email: str) -> bool:
-    """Check if email is in the ADMIN_EMAILS env var (comma-separated)."""
-    admin_emails = os.environ.get("ADMIN_EMAILS", "")
-    if not admin_emails:
-        return False
-    return email.lower() in [e.strip().lower() for e in admin_emails.split(",")]
+    """Check if email has admin role in ALLOWED_EMAILS."""
+    return _parse_allowed_emails().get(email.lower()) == "admin"
 
 
 async def upsert_user(

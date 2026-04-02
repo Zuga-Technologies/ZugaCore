@@ -48,11 +48,21 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _get_allowed_emails() -> set[str] | None:
-    """Return allowed emails from env, or None if unrestricted."""
+    """Return allowed emails from env, or None if unrestricted.
+
+    Supports 'email:role' format — strips the role suffix for the access check.
+    """
     raw = os.environ.get("ALLOWED_EMAILS", "").strip()
     if not raw:
         return None
-    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+    result = set()
+    for entry in raw.split(","):
+        entry = entry.strip().lower()
+        if not entry:
+            continue
+        email = entry.rsplit(":", 1)[0] if ":" in entry else entry
+        result.add(email)
+    return result if result else None
 
 
 # ── Request / Response models ──────────────────────────────────────
