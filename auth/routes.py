@@ -506,4 +506,14 @@ async def admin_reset_user(
         u.role = new_role
         u.onboarding_completed = False
 
+        # Also reset ZugaLife studio onboarding if table exists
+        try:
+            from sqlalchemy import text
+            await session.execute(
+                text("UPDATE life_user_settings SET onboarding_completed = 0 WHERE user_id = :uid"),
+                {"uid": record.id},
+            )
+        except Exception:
+            pass  # Table may not exist in non-ZugaLife deployments
+
     return {"status": "ok", "email": record.email, "role": new_role, "onboarding_reset": True}
