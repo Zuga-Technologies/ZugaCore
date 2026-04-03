@@ -70,11 +70,24 @@ def _add_missing_columns(conn, base) -> None:  # type: ignore[no-untyped-def]
         for col in table.columns:
             if col.name not in existing:
                 col_type = col.type.compile(conn.dialect)
-                default = "DEFAULT NULL" if col.nullable else ""
+                # Build DEFAULT clause: nullable → NULL, else use model default
+                if col.nullable:
+                    default_clause = "DEFAULT NULL"
+                elif col.default is not None and col.default.arg is not None:
+                    val = col.default.arg
+                    if isinstance(val, bool):
+                        default_clause = f"DEFAULT {1 if val else 0}"
+                    elif isinstance(val, (int, float)):
+                        default_clause = f"DEFAULT {val}"
+                    else:
+                        default_clause = f"DEFAULT '{val}'"
+                else:
+                    # NOT NULL with no default — use type-appropriate zero value
+                    default_clause = "DEFAULT ''"
                 conn.execute(text(
-                    f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type} {default}"
+                    f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type} {default_clause}"
                 ))
-                print(f"[init_db] Added column {table_name}.{col.name} ({col_type})")
+                print(f"[init_db] Added column {table_name}.{col.name} ({col_type}) {default_clause}")
 
 
 async def close_db() -> None:
