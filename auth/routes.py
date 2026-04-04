@@ -1,8 +1,25 @@
 import logging
 import os
+import time
+from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+
+
+# ── Simple in-memory rate limiter ─────────────────────────────────
+_rate_buckets: dict[str, list[float]] = defaultdict(list)
+
+
+def _check_rate_limit(key: str, max_requests: int, window_seconds: int) -> None:
+    """Raise 429 if key has exceeded max_requests in the rolling window."""
+    now = time.monotonic()
+    bucket = _rate_buckets[key]
+    _rate_buckets[key] = [t for t in bucket if now - t < window_seconds]
+    bucket = _rate_buckets[key]
+    if len(bucket) >= max_requests:
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+    bucket.append(now)
 
 from supertokens_python.recipe.emailpassword.asyncio import sign_up, sign_in
 from supertokens_python.recipe.emailpassword.interfaces import (
@@ -190,8 +207,11 @@ async def auth_config() -> AuthConfigResponse:
 
 
 @router.post("/register", response_model=MessageResponse)
-async def register(body: RegisterRequest) -> MessageResponse:
+async def register(body: RegisterRequest, request: Request) -> MessageResponse:
     """Create a new password-based account via SuperTokens."""
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"register:{client_ip}", max_requests=3, window_seconds=3600)
+
     email = body.email.strip().lower()
     _check_invite(email)
 
@@ -213,8 +233,11 @@ async def register(body: RegisterRequest) -> MessageResponse:
 
 
 @router.post("/password-login", response_model=LoginResponse)
-async def password_login(body: PasswordLoginRequest) -> LoginResponse:
+async def password_login(body: PasswordLoginRequest, request: Request) -> LoginResponse:
     """Login with email + password via SuperTokens."""
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"login:{client_ip}", max_requests=5, window_seconds=60)
+
     email = body.email.strip().lower()
 
     result = await sign_in("public", email, body.password)
@@ -264,6 +287,7 @@ async def verify_email(body: VerifyEmailRequest) -> MessageResponse:
 async def forgot_password(body: ForgotPasswordRequest) -> MessageResponse:
     """Send a password reset email. Always returns 200 to prevent email enumeration."""
     email = body.email.strip().lower()
+    _check_rate_limit(f"forgot:{email}", max_requests=3, window_seconds=3600)
 
     record = await get_user_by_email(email)
     if record is not None:
