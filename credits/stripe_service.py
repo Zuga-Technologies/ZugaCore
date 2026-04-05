@@ -37,21 +37,21 @@ def _init_stripe() -> None:
 SUBSCRIPTION_TIERS = {
     "starter": {
         "price_env": "STRIPE_PRICE_SUB_STARTER",
-        "tokens": 1500,
-        "bonus_pct": 0.10,
-        "label": "Starter — $5/mo",
+        "tokens": 950,
+        "bonus_pct": 0.05,
+        "label": "Starter — $10/mo",
     },
     "plus": {
         "price_env": "STRIPE_PRICE_SUB_PLUS",
-        "tokens": 4000,
-        "bonus_pct": 0.15,
-        "label": "Plus — $10/mo",
+        "tokens": 2400,
+        "bonus_pct": 0.04,
+        "label": "Plus — $20/mo",
     },
     "power": {
         "price_env": "STRIPE_PRICE_SUB_POWER",
-        "tokens": 10000,
-        "bonus_pct": 0.20,
-        "label": "Power — $30/mo",
+        "tokens": 4750,
+        "bonus_pct": 0.05,
+        "label": "Power — $35/mo",
     },
 }
 
