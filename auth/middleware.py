@@ -16,6 +16,12 @@ async def get_current_user(request: Request) -> CurrentUser:
 
     auth_header = request.headers.get("Authorization")
 
+    # Fallback: accept token as query param (for <video>/<a> elements that can't send headers)
+    if not auth_header:
+        query_token = request.query_params.get("token")
+        if query_token:
+            auth_header = f"Bearer {query_token}"
+
     if not auth_header:
         raise HTTPException(status_code=401, detail="Missing authorization header")
 
