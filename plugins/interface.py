@@ -37,6 +37,15 @@ class StudioPlugin(ABC):
         """If True, all routes require admin access. Override to restrict."""
         return False
 
+    @property
+    def event_catalog(self) -> list[dict]:
+        """Events this studio can emit. Override to enable webhooks.
+
+        Each entry: {"type": "life:habit_completed", "description": "...",
+                     "data_schema": {"field": "type"}, "example": {...}}
+        """
+        return []
+
     async def on_startup(self) -> None:
         """Called when ZugaApp starts. Optional setup work."""
         pass
@@ -81,6 +90,15 @@ class ProxyPlugin(ABC):
     def admin_only(self) -> bool:
         """If True, all proxied routes require admin access. Override to restrict."""
         return False
+
+    @property
+    def event_catalog(self) -> list[dict]:
+        """Events this studio can emit (via POST /api/events/emit).
+
+        Proxy studios declare their catalog here for the webhook UI,
+        but actually emit events by POSTing to ZugaApp's internal endpoint.
+        """
+        return []
 
     async def on_startup(self) -> None:
         """Called when ZugaApp starts. Use to verify standalone is reachable."""
