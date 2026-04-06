@@ -106,8 +106,11 @@ async def get_or_create_customer(user_id: str, email: str) -> str:
     # Search Stripe by email — verify user_id matches to prevent cross-user collision
     customers = stripe.Customer.list(email=email, limit=5)
     for cust in customers.data:
-        meta = dict(cust.metadata) if cust.metadata else {}
-        if meta.get("user_id") == user_id:
+        try:
+            cust_user_id = cust.metadata["user_id"] if cust.metadata else None
+        except (KeyError, AttributeError):
+            cust_user_id = None
+        if cust_user_id == user_id:
             await _store_customer_id(user_id, cust.id)
             return cust.id
 
