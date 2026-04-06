@@ -161,7 +161,7 @@ async def _send(to: str, subject: str, html: str) -> None:
     }
 
     try:
-        result = resend.Emails.send(params)
-        print(f"[EMAIL] Sent to {to}: {subject} — result: {result}", flush=True)
+        resend.Emails.send(params)
+        logger.info("Email sent to %s: %s", to, subject)
     except Exception as exc:
-        print(f"[EMAIL] FAILED to {to}: {subject} — error: {exc}", flush=True)
+        logger.error("Resend failed for %s: %s", to, exc)
