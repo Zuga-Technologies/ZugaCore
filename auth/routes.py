@@ -173,11 +173,33 @@ def _user_dict(user: CurrentUser) -> dict:
     }
 
 
-def _check_invite(email: str) -> None:
-    """Raise 403 if invite-only mode and email not in list."""
+async def _is_waitlist_approved(email: str) -> bool:
+    """Check if email was approved via the waitlist system."""
+    try:
+        from core.database.session import get_session
+        from sqlalchemy import text
+        async with get_session() as session:
+            row = await session.execute(
+                text("SELECT status FROM waitlist WHERE email = :email"),
+                {"email": email},
+            )
+            result = row.fetchone()
+            return result is not None and result[0] == "approved"
+    except Exception:
+        return False
+
+
+async def _check_invite(email: str) -> None:
+    """Raise 403 if invite-only mode and email not in allowed list or waitlist."""
     allowed = _get_allowed_emails()
-    if allowed and email not in allowed:
-        raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
+    if not allowed:
+        return
+    if email in allowed:
+        return
+    # Check if email was approved via waitlist
+    if await _is_waitlist_approved(email):
+        return
+    raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
 
 
 # ── Endpoints ──────────────────────────────────────────────────────
@@ -213,7 +235,11 @@ async def register(body: RegisterRequest, request: Request) -> MessageResponse:
     _check_rate_limit(f"register:{client_ip}", max_requests=3, window_seconds=3600)
 
     email = body.email.strip().lower()
-    _check_invite(email)
+
+    # Check if user was approved via waitlist (bypasses invite gate + email verification)
+    waitlist_approved = await _is_waitlist_approved(email)
+    if not waitlist_approved:
+        await _check_invite(email)
 
     result = await sign_up("public", email, body.password)
     if isinstance(result, EmailAlreadyExistsError):
@@ -223,7 +249,12 @@ async def register(body: RegisterRequest, request: Request) -> MessageResponse:
     await upsert_user(email=email, auth_provider="password")
     await link_supertokens_id(email, st_user_id)
 
-    # Send verification email
+    if waitlist_approved:
+        # Waitlist already verified their email — skip verification
+        await set_email_verified(email)
+        return MessageResponse(message="Account created — you're all set!")
+
+    # Standard flow: send verification email
     from core.auth.email_token_store import create_email_token
     from core.auth.email_service import send_verification_email
     token = await create_email_token(email, "verify")
@@ -328,7 +359,7 @@ async def login(body: LoginRequest) -> LoginResponse:
     if get_auth_mode() == "password":
         raise HTTPException(status_code=403, detail="Email-only login is disabled — use password login")
 
-    _check_invite(body.email.strip().lower())
+    await _check_invite(body.email.strip().lower())
 
     record = await upsert_user(email=body.email, auth_provider="dev")
 
@@ -358,7 +389,7 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
     from core.auth.google import verify_google_token
     google_user = verify_google_token(body.credential, client_id)
 
-    _check_invite(google_user["email"].lower())
+    await _check_invite(google_user["email"].lower())
 
     record = await upsert_user(
         email=google_user["email"],
@@ -417,7 +448,7 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
         raise HTTPException(status_code=400, detail="Could not get email from OAuth provider")
 
     email = user_info.email.id.lower()
-    _check_invite(email)
+    await _check_invite(email)
 
     st_result = await manually_create_or_update_user(
         tenant_id="public",
