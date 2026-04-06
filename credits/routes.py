@@ -60,6 +60,50 @@ async def my_balance(user: CurrentUser = Depends(get_current_user)) -> dict:
     return balance
 
 
+@router.get("/api/gamer/tokens/balance")
+async def gamer_balance(request: Request) -> dict:
+    """Get token balance for Overlay clients. Supports HMAC or X-User-Id auth.
+
+    The Overlay can't easily maintain a browser session, so this endpoint
+    accepts HMAC-signed requests (X-App-Signature + X-Timestamp + X-User-Id).
+    """
+    import hashlib
+    import hmac as hmac_mod
+    import time
+
+    user_id = request.headers.get("X-User-Id", "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Missing X-User-Id header")
+
+    # Verify HMAC signature
+    signature = request.headers.get("X-App-Signature", "")
+    timestamp_str = request.headers.get("X-Timestamp", "")
+    secret = os.environ.get("OVERLAY_APP_SECRET", "").strip()
+
+    if signature and timestamp_str and secret:
+        try:
+            timestamp = int(timestamp_str)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="Invalid timestamp")
+        if abs(int(time.time()) - timestamp) > 300:
+            raise HTTPException(status_code=401, detail="Request expired")
+        message = f"{user_id}:{timestamp}"
+        expected = hmac_mod.new(
+            secret.encode(), message.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac_mod.compare_digest(expected, signature):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+    else:
+        # No HMAC — require service key as fallback
+        service_key = request.headers.get("X-Service-Key", "")
+        expected_key = os.environ.get("STUDIO_SERVICE_KEY", "").strip()
+        if not expected_key or service_key != expected_key:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+    balance = await get_balance(user_id)
+    return balance
+
+
 @router.get("/api/tokens/history")
 async def my_history(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
@@ -295,6 +339,101 @@ async def admin_set_test_tier(
 
     logger.info("Admin %s set test tier: %s → %s", user.email, body.email, body.tier)
     return result
+
+
+# ── Overlay Token Endpoints (HMAC or session auth) ──────────────────────
+
+class OverlaySpendRequest(BaseModel):
+    amount: float = Field(gt=0, le=10_000)
+    source: str = Field(default="gamer_overlay", max_length=64)
+    reason: str = Field(default="overflow_query", max_length=255)
+
+
+@router.post("/api/tokens/spend")
+async def overlay_token_spend(body: OverlaySpendRequest, request: Request) -> dict:
+    """Deduct tokens from a user's balance. Used by Overlay for overflow.
+
+    Auth: X-User-Id header required. Accepts either:
+      - Session auth (logged-in user)
+      - HMAC signature (X-App-Signature + X-Timestamp) from Overlay
+    """
+    import hashlib
+    import hmac as hmac_mod
+    import time
+
+    user_id = request.headers.get("X-User-Id", "").strip()
+
+    # Try session auth first
+    if not user_id:
+        try:
+            user = await get_current_user(request)
+            user_id = user.id
+        except Exception:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Missing user identification")
+
+    # Verify HMAC signature if present
+    signature = request.headers.get("X-App-Signature", "")
+    timestamp_str = request.headers.get("X-Timestamp", "")
+    if signature and timestamp_str:
+        secret = os.environ.get("OVERLAY_APP_SECRET", "").strip()
+        if secret:
+            try:
+                timestamp = int(timestamp_str)
+            except ValueError:
+                raise HTTPException(status_code=401, detail="Invalid timestamp")
+            if abs(int(time.time()) - timestamp) > 300:
+                raise HTTPException(status_code=401, detail="Request expired")
+            message = f"{user_id}:{timestamp}"
+            expected = hmac_mod.new(
+                secret.encode(), message.encode(), hashlib.sha256
+            ).hexdigest()
+            if not hmac_mod.compare_digest(expected, signature):
+                raise HTTPException(status_code=401, detail="Invalid signature")
+        # Signature valid — proceed
+    else:
+        # No signature — require session auth
+        try:
+            user = await get_current_user(request)
+            if user.id != user_id:
+                raise HTTPException(status_code=403, detail="User ID mismatch")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Look up email for the user
+    from core.database.session import get_session
+    from core.auth.models import UserRecord
+    from sqlalchemy import select
+
+    email = ""
+    try:
+        async with get_session() as session:
+            result = await session.execute(
+                select(UserRecord.email).where(UserRecord.id == user_id)
+            )
+            email = result.scalar_one_or_none() or ""
+    except Exception:
+        pass
+
+    # Estimate raw cost from tokens (reverse the 3x markup)
+    from core.credits.manager import tokens_to_dollars
+    cost_usd = tokens_to_dollars(body.amount)
+
+    await record_spend(
+        user_id=user_id,
+        tokens=body.amount,
+        cost_usd=cost_usd,
+        service=body.source,
+        reason=body.reason,
+        model=None,
+    )
+
+    balance = await get_balance(user_id)
+    return {"recorded": True, "balance": balance}
 
 
 # ── Service-to-Service Endpoints (for standalone studios) ────────────────

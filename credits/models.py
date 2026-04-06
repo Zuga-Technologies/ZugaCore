@@ -108,7 +108,7 @@ class TokenTransaction(Base):
 class Subscription(Base, TimestampMixin):
     """Stripe subscription state for a user.
 
-    Tiers: starter ($5/mo, 1500 tokens), plus ($10/mo, 4000), power ($30/mo, 10000).
+    Tiers: starter ($10/mo, 950+5% bonus), plus ($20/mo, 2400+4% bonus), power ($35/mo, 4750+5% bonus).
     """
 
     __tablename__ = "subscription"

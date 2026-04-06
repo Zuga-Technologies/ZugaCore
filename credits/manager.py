@@ -566,9 +566,9 @@ TEST_EMAIL = os.environ.get("ZUGATOKENS_TEST_EMAIL", "")
 
 TIER_TOKEN_MAP = {
     "free": 0,
-    "starter": 1500,
-    "plus": 4000,
-    "power": 10000,
+    "starter": 950,
+    "plus": 2400,
+    "power": 4750,
 }
 
 
