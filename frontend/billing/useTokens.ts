@@ -12,6 +12,7 @@ export const useTokenStore = defineStore('zugatokens', () => {
   const tiers = ref<Tier[]>([])
   const loading = ref(false)
   const purchaseLoading = ref<string | null>(null)
+  const purchaseError = ref<string | null>(null)
 
   // ── Computed ─────────────────────────────────────────────────────
   const balancePercent = computed(() => {
@@ -72,22 +73,26 @@ export const useTokenStore = defineStore('zugatokens', () => {
 
   async function buyPack(packId: string) {
     purchaseLoading.value = packId
+    purchaseError.value = null
     try {
       const { checkout_url } = await api.post<{ checkout_url: string }>('/api/tokens/purchase', { pack: packId })
       window.location.href = checkout_url
-    } catch (e) {
+    } catch (e: any) {
       console.error('Purchase failed:', e)
+      purchaseError.value = e?.body?.detail || e?.message || 'Purchase failed. Please try again.'
       purchaseLoading.value = null
     }
   }
 
   async function subscribeTier(tierId: string) {
     purchaseLoading.value = tierId
+    purchaseError.value = null
     try {
       const { checkout_url } = await api.post<{ checkout_url: string }>('/api/tokens/subscribe', { tier: tierId })
       window.location.href = checkout_url
-    } catch (e) {
+    } catch (e: any) {
       console.error('Subscribe failed:', e)
+      purchaseError.value = e?.body?.detail || e?.message || 'Subscription failed. Please try again.'
       purchaseLoading.value = null
     }
   }
@@ -117,6 +122,7 @@ export const useTokenStore = defineStore('zugatokens', () => {
     tiers,
     loading,
     purchaseLoading,
+    purchaseError,
     // Computed
     balancePercent,
     hasBalance,

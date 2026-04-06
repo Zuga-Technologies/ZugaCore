@@ -129,6 +129,12 @@ async def purchase_topup(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        logger.error("Stripe config error on purchase: %s", e)
+        raise HTTPException(status_code=503, detail="Payment system not configured")
+    except Exception as e:
+        logger.exception("Unexpected error creating checkout session")
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
     return {"checkout_url": checkout_url}
 
 
@@ -149,6 +155,12 @@ async def subscribe_tier(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        logger.error("Stripe config error on subscribe: %s", e)
+        raise HTTPException(status_code=503, detail="Payment system not configured")
+    except Exception as e:
+        logger.exception("Unexpected error creating subscription session")
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
     return {"checkout_url": checkout_url}
 
 
