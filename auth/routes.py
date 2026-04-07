@@ -236,9 +236,12 @@ async def register(body: RegisterRequest, request: Request) -> MessageResponse:
 
     email = body.email.strip().lower()
 
-    # Check if user was approved via waitlist (bypasses invite gate + email verification)
+    # Check if user was approved via waitlist or ALLOWED_EMAILS
     waitlist_approved = await _is_waitlist_approved(email)
-    if not waitlist_approved:
+    allowed_emails = _get_allowed_emails()
+    is_whitelisted = allowed_emails is not None and email in allowed_emails
+
+    if not waitlist_approved and not is_whitelisted:
         await _check_invite(email)
 
     result = await sign_up("public", email, body.password)
@@ -249,8 +252,8 @@ async def register(body: RegisterRequest, request: Request) -> MessageResponse:
     await upsert_user(email=email, auth_provider="password")
     await link_supertokens_id(email, st_user_id)
 
-    if waitlist_approved:
-        # Waitlist already verified their email — skip verification
+    if waitlist_approved or is_whitelisted:
+        # Pre-approved users skip email verification
         await set_email_verified(email)
         return MessageResponse(message="Account created — you're all set!")
 
@@ -277,10 +280,15 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
 
     st_user_id = result.user.id
 
-    # Check email verification
+    # Check email verification (whitelisted users bypass)
     record = await get_user_by_email(email)
+    allowed_emails = _get_allowed_emails()
+    is_whitelisted = allowed_emails is not None and email in allowed_emails
     if record and not record.email_verified:
-        raise HTTPException(status_code=403, detail="Please verify your email before logging in")
+        if is_whitelisted:
+            await set_email_verified(email)
+        else:
+            raise HTTPException(status_code=403, detail="Please verify your email before logging in")
 
     # Ensure app profile exists and is linked
     if record is None:
