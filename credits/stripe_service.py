@@ -174,6 +174,25 @@ async def create_checkout_subscription(
     if tier not in SUBSCRIPTION_TIERS:
         raise ValueError(f"Invalid tier: {tier}. Must be one of {list(SUBSCRIPTION_TIERS.keys())}")
 
+    # Prevent duplicate subscriptions — one active sub per account
+    from core.credits.models import Subscription
+    from core.database.session import get_session
+    from sqlalchemy import select
+
+    async with get_session() as session_db:
+        result = await session_db.execute(
+            select(Subscription).where(
+                Subscription.user_id == user_id,
+                Subscription.status == "active",
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            raise ValueError(
+                f"You already have an active {existing.tier} subscription. "
+                f"Cancel it first or purchase a top-up instead."
+            )
+
     _init_stripe()
     tier_info = SUBSCRIPTION_TIERS[tier]
     price_id = _get_price_id(tier_info["price_env"])
