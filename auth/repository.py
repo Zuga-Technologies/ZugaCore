@@ -166,6 +166,45 @@ async def link_supertokens_id(email: str, st_user_id: str) -> None:
             user.supertokens_user_id = st_user_id
 
 
+async def provision_allowed_emails() -> int:
+    """Auto-create verified user records for all ALLOWED_EMAILS entries.
+
+    Called at startup. Ensures every whitelisted email has a row in
+    the users table with email_verified=True so they can log in
+    immediately via any auth method (password, Google, GitHub).
+    Returns the number of newly created users.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+    allowed = _parse_allowed_emails()
+    if not allowed:
+        return 0
+
+    created = 0
+    async with get_session() as session:
+        for email, role in allowed.items():
+            result = await session.execute(
+                select(UserRecord).where(UserRecord.email == email)
+            )
+            user = result.scalar_one_or_none()
+            if user is None:
+                user = UserRecord(
+                    id=str(uuid.uuid4()),
+                    email=email,
+                    auth_provider="pending",
+                    role=role,
+                    email_verified=True,
+                )
+                session.add(user)
+                _logger.info("Provisioned user: %s (role=%s)", email, role)
+                created += 1
+            elif not user.email_verified:
+                user.email_verified = True
+                _logger.info("Auto-verified existing user: %s", email)
+
+    return created
+
+
 async def get_onboarding_state(user_id: str) -> bool:
     """Return whether the user has completed app-level onboarding."""
     async with get_session() as session:
