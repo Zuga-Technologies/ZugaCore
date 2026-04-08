@@ -78,18 +78,9 @@ def _get_admin_emails() -> set[str]:
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
-def _get_unlimited_emails() -> set[str]:
-    """Emails with unlimited tokens (legacy — kept for backward compat)."""
-    raw = os.environ.get("UNLIMITED_CREDIT_EMAILS", "").strip()
-    if not raw:
-        return set()
-    return {e.strip().lower() for e in raw.split(",") if e.strip()}
-
-
 def _is_unlimited(email: str) -> bool:
-    """Check if a user has unlimited tokens (admin or legacy unlimited)."""
-    lower = email.lower()
-    return lower in _get_admin_emails() or lower in _get_unlimited_emails()
+    """Check if a user has unlimited tokens (admin)."""
+    return email.lower() in _get_admin_emails()
 
 
 # ── Conversion Helpers ────────────────────────────────────────────────
