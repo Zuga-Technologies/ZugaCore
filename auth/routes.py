@@ -64,6 +64,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+async def _maybe_welcome_grant(user_id: str) -> None:
+    """Issue welcome tokens on first sign-in. Silently no-ops on failure."""
+    try:
+        from core.credits.manager import issue_welcome_grant_if_new
+
+        granted = await issue_welcome_grant_if_new(user_id)
+        if granted:
+            logger.info("Welcome grant issued for user %s", user_id)
+    except Exception:
+        logger.debug("Welcome grant skipped (credits module unavailable)", exc_info=True)
+
+
 def _get_allowed_emails() -> set[str] | None:
     """Return allowed emails from env, or None if unrestricted.
 
@@ -301,6 +313,7 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
         name=record.name, avatar_url=record.avatar_url,
     )
     token = await _create_session(st_user_id)
+    await _maybe_welcome_grant(record.id)
 
     return LoginResponse(token=token, user=_user_dict(user))
 
@@ -380,6 +393,7 @@ async def login(body: LoginRequest) -> LoginResponse:
 
     user = CurrentUser(id=record.id, email=record.email, role=record.role)
     token = await _create_session(record.supertokens_user_id or record.id)
+    await _maybe_welcome_grant(record.id)
 
     return LoginResponse(token=token, user=_user_dict(user))
 
@@ -425,6 +439,7 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
         name=record.name, avatar_url=record.avatar_url,
     )
     token = await _create_session(st_user_id)
+    await _maybe_welcome_grant(record.id)
 
     return LoginResponse(token=token, user=_user_dict(user))
 
@@ -482,6 +497,7 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
         name=record.name, avatar_url=record.avatar_url,
     )
     token = await _create_session(st_result.user.id)
+    await _maybe_welcome_grant(record.id)
 
     return LoginResponse(token=token, user=_user_dict(user))
 
@@ -516,6 +532,41 @@ async def me(user: CurrentUser = Depends(get_current_user)) -> UserResponse:
         name=user.name,
         avatar_url=user.avatar_url,
     )
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/change-password", response_model=MessageResponse)
+async def change_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> MessageResponse:
+    """Change password for the currently authenticated user."""
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"change-pw:{client_ip}", max_requests=3, window_seconds=300)
+
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    # Verify current password
+    result = await sign_in("public", user.email, body.current_password)
+    if isinstance(result, WrongCredentialsError):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    # Update password
+    record = await get_user_by_email(user.email)
+    st_id = record.supertokens_user_id if record else None
+    if not st_id:
+        raise HTTPException(status_code=400, detail="Password change not available for this account")
+
+    from supertokens_python.recipe.emailpassword.asyncio import update_email_or_password
+    await update_email_or_password(recipe_user_id=st_id, password=body.new_password)
+
+    return MessageResponse(message="Password updated successfully.")
 
 
 # ── Onboarding state ─────────────────────────────────────────────

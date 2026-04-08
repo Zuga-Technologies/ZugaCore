@@ -120,15 +120,21 @@ def credits_to_dollars(credits: float) -> float:
 
 # ── Wallet Operations ────────────────────────────────────────────────
 
-async def _get_or_create_balance(session, user_id: str) -> TokenBalance:
-    """Get a user's token balance, creating it with a one-time welcome grant if new."""
+async def _get_or_create_balance(
+    session, user_id: str, *, grant_welcome: bool = False,
+) -> TokenBalance:
+    """Get a user's token balance, creating an empty wallet if new.
+
+    Welcome grant is only issued when grant_welcome=True (first authenticated
+    sign-in). Anonymous / placeholder users get zero tokens.
+    """
     result = await session.execute(
         select(TokenBalance).where(TokenBalance.user_id == user_id)
     )
     balance = result.scalar_one_or_none()
 
     if balance is None:
-        welcome = _get_welcome_tokens()
+        welcome = _get_welcome_tokens() if grant_welcome else 0
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         balance = TokenBalance(
             user_id=user_id,
@@ -140,7 +146,10 @@ async def _get_or_create_balance(session, user_id: str) -> TokenBalance:
         )
         session.add(balance)
         await session.flush()
-        logger.info("Created token balance for user %s with %s welcome tokens", user_id, welcome)
+        logger.info(
+            "Created token balance for user %s with %s welcome tokens (grant=%s)",
+            user_id, welcome, grant_welcome,
+        )
 
     return balance
 
@@ -175,6 +184,24 @@ async def _maybe_refill_free_tokens(session, balance: TokenBalance) -> bool:
 
     logger.debug("Refilled free tokens for user %s: %s → %s", balance.user_id, old_balance, daily_amount)
     return True
+
+
+async def issue_welcome_grant_if_new(user_id: str) -> bool:
+    """Issue welcome tokens on first authenticated sign-in. Idempotent.
+
+    Returns True if the grant was issued, False if the user already had a balance.
+    Call this from auth routes after successful login/signup.
+    """
+    async with get_session() as session:
+        result = await session.execute(
+            select(TokenBalance).where(TokenBalance.user_id == user_id)
+        )
+        if result.scalar_one_or_none() is not None:
+            return False  # Already has a balance — no duplicate grant
+        await _get_or_create_balance(session, user_id, grant_welcome=True)
+        await session.commit()
+        logger.info("Issued welcome grant for authenticated user %s", user_id)
+        return True
 
 
 async def _deduct_tokens(session, balance: TokenBalance, tokens: float, reason: str) -> list[dict]:
