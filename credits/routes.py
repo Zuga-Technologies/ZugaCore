@@ -632,3 +632,41 @@ async def cli_sync_roles(
                 })
 
     return {"updated": updated, "count": len(updated)}
+
+
+@router.post("/api/cli/reset-free-tokens")
+async def cli_reset_free_tokens(
+    _key: str = Depends(_verify_service_key),
+) -> dict:
+    """CLI: Reset all users' free_tokens to the current ZUGATOKEN_WELCOME_GRANT value.
+
+    Used to correct balances after an env var misconfiguration.
+    """
+    from core.credits.models import TokenBalance, TokenTransaction
+    from core.database.session import get_session
+    from core.credits.manager import _get_welcome_tokens
+    from sqlalchemy import select
+
+    target = _get_welcome_tokens()
+    updated = []
+
+    async with get_session() as session:
+        result = await session.execute(select(TokenBalance))
+        balances = result.scalars().all()
+
+        for bal in balances:
+            if bal.free_tokens != target:
+                old = bal.free_tokens
+                bal.free_tokens = target
+                total = target + bal.sub_tokens + bal.sub_rollover + bal.purchased_tokens
+                session.add(TokenTransaction(
+                    user_id=bal.user_id,
+                    type="grant",
+                    amount=target - old,
+                    source="free",
+                    reason=f"admin_reset_free_tokens:{old:.0f}->{target:.0f}",
+                    balance_after=total,
+                ))
+                updated.append({"user_id": bal.user_id, "old": old, "new": target})
+
+    return {"target": target, "updated": updated, "count": len(updated)}
