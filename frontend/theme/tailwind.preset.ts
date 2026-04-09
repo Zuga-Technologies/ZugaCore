@@ -36,7 +36,7 @@ export default {
           to: { opacity: '1' },
         },
         'slide-up': {
-          from: { opacity: '0', transform: 'translateY(8px)' },
+          from: { opacity: '0', transform: 'translateY(6px)' },
           to: { opacity: '1', transform: 'translateY(0)' },
         },
         'pulse-glow': {
@@ -44,13 +44,13 @@ export default {
           '50%': { boxShadow: '0 0 20px rgba(245, 158, 11, 0.5)' },
         },
         'dash-card-in': {
-          from: { opacity: '0', transform: 'translateY(12px) scale(0.98)' },
+          from: { opacity: '0', transform: 'translateY(8px) scale(0.99)' },
           to: { opacity: '1', transform: 'translateY(0) scale(1)' },
         },
       },
       animation: {
-        'fade-in': 'fade-in 0.3s ease-out',
-        'slide-up': 'slide-up 0.4s ease-out',
+        'fade-in': 'fade-in 0.15s ease-out',
+        'slide-up': 'slide-up 0.25s ease-out',
         'pulse-glow': 'pulse-glow 2s ease-in-out infinite',
       },
     },
