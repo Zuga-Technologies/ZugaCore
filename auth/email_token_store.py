@@ -54,19 +54,27 @@ async def create_email_token(email: str, purpose: str) -> str:
     """Create a single-use token for the given email and purpose.
 
     purpose: 'verify' or 'reset'
+
+    Multiple tokens can coexist for the same email — all remain valid until
+    consumed or expired.  This prevents double-request race conditions where
+    a network retry or duplicate POST would silently kill the first token.
+    Expired tokens are cleaned up by cleanup_expired_tokens().
     """
     token = secrets.token_urlsafe(32)
+    now = time.time()
+    ttl = VERIFY_TTL if purpose == "verify" else RESET_TTL
     async with aiosqlite.connect(_get_db_path()) as db:
-        # Delete any existing tokens for this email+purpose (only latest valid)
+        # Purge only *expired* tokens for this email — keep any still-valid ones
         await db.execute(
-            "DELETE FROM email_tokens WHERE email = ? AND purpose = ?",
-            (email.lower(), purpose),
+            "DELETE FROM email_tokens WHERE email = ? AND purpose = ? AND created_at < ?",
+            (email.lower(), purpose, now - ttl),
         )
         await db.execute(
             "INSERT INTO email_tokens (token, email, purpose, created_at) VALUES (?, ?, ?, ?)",
-            (token, email.lower(), purpose, time.time()),
+            (token, email.lower(), purpose, now),
         )
         await db.commit()
+    logger.info("Created %s token for %s", purpose, email.lower())
     return token
 
 
@@ -76,6 +84,7 @@ async def consume_email_token(token: str, purpose: str) -> str | None:
     Single-use: the token is deleted after consumption.
     """
     ttl = VERIFY_TTL if purpose == "verify" else RESET_TTL
+    token_prefix = token[:8] if token else "?"
 
     async with aiosqlite.connect(_get_db_path()) as db:
         db.row_factory = aiosqlite.Row
@@ -86,10 +95,15 @@ async def consume_email_token(token: str, purpose: str) -> str | None:
         row = await cursor.fetchone()
 
         if row is None:
+            logger.warning("Token %s… not found for purpose=%s", token_prefix, purpose)
             return None
 
-        # Check expiry
-        if time.time() - row["created_at"] > ttl:
+        age = time.time() - row["created_at"]
+        if age > ttl:
+            logger.warning(
+                "Token %s… expired (age=%.0fs, ttl=%ds) for %s",
+                token_prefix, age, ttl, row["email"],
+            )
             await db.execute("DELETE FROM email_tokens WHERE token = ?", (token,))
             await db.commit()
             return None
@@ -97,6 +111,7 @@ async def consume_email_token(token: str, purpose: str) -> str | None:
         # Consume (delete) the token
         await db.execute("DELETE FROM email_tokens WHERE token = ?", (token,))
         await db.commit()
+        logger.info("Consumed %s token %s… for %s (age=%.0fs)", purpose, token_prefix, row["email"], age)
         return row["email"]
 
 
