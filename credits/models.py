@@ -50,7 +50,7 @@ class TokenBalance(Base, TimestampMixin):
     """Per-user token wallet with three buckets.
 
     Spend priority: free → subscription → purchased.
-    Free tokens refill daily, subscription tokens allocated monthly,
+    Free tokens are a one-time welcome grant, subscription tokens allocated monthly,
     purchased tokens never expire.
     """
 
@@ -59,7 +59,7 @@ class TokenBalance(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
 
-    # Free daily tokens (use-it-or-lose-it, refills at midnight UTC)
+    # Free welcome grant tokens (one-time, no refill)
     free_tokens: Mapped[float] = mapped_column(Float, default=0)
     free_tokens_date: Mapped[str | None] = mapped_column(String(10), nullable=True)  # "2026-03-21"
 
@@ -78,7 +78,7 @@ class TokenTransaction(Base):
     """Every token movement gets a row. This is the accounting ledger.
 
     Types:
-        free_refill   — Daily 50-token refill
+        welcome_grant — One-time welcome bonus
         subscription  — Monthly subscription allocation
         purchase      — Top-up pack bought via Stripe
         spend         — Tokens deducted for an AI feature

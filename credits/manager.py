@@ -1,7 +1,7 @@
-"""ZugaTokens manager — per-user wallet tracking, spend gating, and daily refills.
+"""ZugaTokens manager — per-user wallet tracking and spend gating.
 
 Replaces the old email-allowlist credit gate with a proper token wallet system.
-Three token buckets (free daily, subscription, purchased) with priority-order deduction.
+Three token buckets (free welcome grant, subscription, purchased) with priority-order deduction.
 
 Usage:
     from core.credits.manager import can_spend, record_spend, get_balance
@@ -145,36 +145,8 @@ async def _get_or_create_balance(
     return balance
 
 
-async def _maybe_refill_free_tokens(session, balance: TokenBalance) -> bool:
-    """No-op — free tokens are now a one-time welcome grant, not daily.
 
-    Kept as a no-op so callers don't need to change.
-    Set ZUGATOKEN_DAILY_REFILL=true to re-enable daily refills if needed.
-    """
-    if os.environ.get("ZUGATOKEN_DAILY_REFILL", "").lower() not in ("true", "1"):
-        return False
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if balance.free_tokens_date == today:
-        return False
-
-    old_balance = balance.free_tokens
-    daily_amount = _get_welcome_tokens()
-    balance.free_tokens = daily_amount
-    balance.free_tokens_date = today
-
-    total = balance.free_tokens + balance.sub_tokens + balance.sub_rollover + balance.purchased_tokens
-    session.add(TokenTransaction(
-        user_id=balance.user_id,
-        type="free_refill",
-        amount=daily_amount,
-        source="free",
-        reason=f"daily_refill (replaced {old_balance:.0f} unused)",
-        balance_after=total,
-    ))
-
-    logger.debug("Refilled free tokens for user %s: %s → %s", balance.user_id, old_balance, daily_amount)
-    return True
 
 
 async def issue_welcome_grant_if_new(user_id: str) -> bool:
@@ -247,8 +219,6 @@ async def can_spend(user_id: str, email: str, estimated_tokens: float = 0) -> bo
 
     - Admins / unlimited emails: always True (verified against stored email)
     - Others: check total wallet balance >= estimated_tokens
-    - Also handles daily free token refill
-
     WARNING: This is a non-atomic read. For spend operations, use try_spend()
     which holds a per-user lock across check+deduct to prevent TOCTOU races.
     """
@@ -267,7 +237,7 @@ async def can_spend(user_id: str, email: str, estimated_tokens: float = 0) -> bo
 
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
-        await _maybe_refill_free_tokens(session, balance)
+
 
         total = (
             balance.free_tokens
@@ -314,7 +284,7 @@ async def try_spend(
     async with lock:
         async with get_session() as session:
             balance = await _get_or_create_balance(session, user_id)
-            await _maybe_refill_free_tokens(session, balance)
+    
 
             total = (
                 balance.free_tokens
@@ -408,7 +378,7 @@ async def get_balance(user_id: str) -> dict:
     """Get a user's current token balance across all wallets."""
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
-        await _maybe_refill_free_tokens(session, balance)
+
 
         return {
             "user_id": user_id,

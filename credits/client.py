@@ -12,13 +12,14 @@ Usage:
 
     response = await ai_call(...)
 
-    await client.record_spend(
+    await client.try_spend(
         user_id=user_id,
+        email=user_email,
         tokens=dollars_to_tokens(response.cost),
         cost_usd=response.cost,
         service="venice",
-        model=response.model,
         reason="therapist",
+        model=response.model,
     )
 """
 
@@ -68,6 +69,20 @@ class CreditClient(abc.ABC):
     ) -> None:
         ...
 
+    @abc.abstractmethod
+    async def try_spend(
+        self,
+        user_id: str,
+        email: str,
+        tokens: float,
+        cost_usd: float,
+        service: str,
+        reason: str,
+        model: str | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
+        ...
+
 
 class DirectCreditClient(CreditClient):
     """Shared DB mode — uses token wallet directly.
@@ -92,6 +107,29 @@ class DirectCreditClient(CreditClient):
         from core.credits.manager import record_spend
         await record_spend(
             user_id=user_id,
+            tokens=tokens,
+            cost_usd=cost_usd,
+            service=service,
+            reason=reason,
+            model=model,
+            metadata=metadata,
+        )
+
+    async def try_spend(
+        self,
+        user_id: str,
+        email: str,
+        tokens: float,
+        cost_usd: float,
+        service: str,
+        reason: str,
+        model: str | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
+        from core.credits.manager import try_spend
+        return await try_spend(
+            user_id=user_id,
+            email=email,
             tokens=tokens,
             cost_usd=cost_usd,
             service=service,
@@ -157,6 +195,41 @@ class HttpCreditClient(CreditClient):
         except Exception as e:
             logger.error("HTTP record_spend failed (spend NOT tracked): %s", e)
 
+    async def try_spend(
+        self,
+        user_id: str,
+        email: str,
+        tokens: float,
+        cost_usd: float,
+        service: str,
+        reason: str,
+        model: str | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/api/credits/try-spend",
+                    json={
+                        "user_id": user_id,
+                        "email": email,
+                        "tokens": tokens,
+                        "cost_usd": cost_usd,
+                        "service": service,
+                        "reason": reason,
+                        "model": model,
+                        "metadata": metadata,
+                    },
+                    headers=self._headers,
+                )
+                resp.raise_for_status()
+                return resp.json().get("success", False)
+        except Exception as e:
+            logger.error("HTTP try_spend failed: %s", e)
+            return False
+
     @property
     def _headers(self) -> dict[str, str]:
         h: dict[str, str] = {"Content-Type": "application/json"}
@@ -194,6 +267,23 @@ class NullCreditClient(CreditClient):
             "[NullTokens] user=%s tokens=%.1f ($%.4f) service=%s reason=%s",
             user_id, tokens, cost_usd, service, reason,
         )
+
+    async def try_spend(
+        self,
+        user_id: str,
+        email: str,
+        tokens: float,
+        cost_usd: float,
+        service: str,
+        reason: str,
+        model: str | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
+        logger.info(
+            "[NullTokens] try_spend: user=%s tokens=%.1f ($%.4f) service=%s reason=%s",
+            user_id, tokens, cost_usd, service, reason,
+        )
+        return True
 
 
 # ── Singleton factory ───────────────────────────────────────────────────
