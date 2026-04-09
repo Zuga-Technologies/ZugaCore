@@ -16,7 +16,7 @@ export function formatTokenCost(usd: number): string {
 export const txTypeLabel: Record<string, string> = {
   spend: 'Used',
   purchase: 'Purchased',
-  free_refill: 'Daily Refill',
+  welcome_grant: 'Welcome Bonus',
   subscription: 'Subscription',
   grant: 'Bonus',
   expire: 'Expired',
@@ -27,7 +27,7 @@ export const txTypeLabel: Record<string, string> = {
 export const txTypeIconName: Record<string, string> = {
   spend: 'TrendingDown',
   purchase: 'ShoppingCart',
-  free_refill: 'RefreshCw',
+  welcome_grant: 'Gift',
   subscription: 'CreditCard',
   grant: 'Gift',
   expire: 'Clock',

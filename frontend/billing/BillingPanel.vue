@@ -4,7 +4,7 @@ import { useTokenStore } from './useTokens'
 import { txTypeLabel, formatDate, formatReason } from './helpers'
 import {
   Coins, ShoppingCart, CreditCard, TrendingDown, TrendingUp,
-  RefreshCw, Gift, Zap, Clock, Infinity,
+  Gift, Zap, Clock, Infinity,
 } from 'lucide-vue-next'
 
 const props = withDefaults(defineProps<{
@@ -21,7 +21,7 @@ const showPurchaseModal = ref(false)
 const txTypeIcon: Record<string, any> = {
   spend: TrendingDown,
   purchase: ShoppingCart,
-  free_refill: RefreshCw,
+  welcome_grant: Gift,
   subscription: CreditCard,
   grant: Gift,
   expire: Clock,

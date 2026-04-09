@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Coins, Zap, Clock } from 'lucide-vue-next'
+import { Coins, Zap } from 'lucide-vue-next'
 
 interface Props {
   estimatedCost?: number
@@ -54,8 +54,7 @@ const emit = defineEmits<{
               @click="emit('close')"
               class="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-bdr text-sm text-txt-muted hover:text-txt-primary hover:bg-surface-2 transition-colors"
             >
-              <Clock :size="14" />
-              Wait for Tomorrow's Refill
+              Maybe Later
             </button>
           </div>
         </div>
