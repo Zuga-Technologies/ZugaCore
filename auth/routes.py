@@ -364,7 +364,7 @@ async def reset_password(body: ResetPasswordRequest) -> MessageResponse:
     record = await get_user_by_email(email)
     if record and record.supertokens_user_id:
         await update_email_or_password(
-            recipe_user_id=record.supertokens_user_id,
+            recipe_user_id=RecipeUserId(record.supertokens_user_id),
             password=body.password,
         )
         await revoke_all_sessions_for_user(record.supertokens_user_id)
