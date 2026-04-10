@@ -1,0 +1,146 @@
+/*
+ * ZugaApp Design Token Variables
+ *
+ * All color tokens are defined as RGB channels (e.g. "245 158 11")
+ * so Tailwind's opacity modifier syntax works: bg-accent/10 → rgb(var(--accent) / 0.1)
+ *
+ * To create a new theme preset, add a [data-theme="your-name"] block
+ * that overrides any subset of these variables.
+ */
+
+:root {
+  /* ── Surfaces (dark scale) ── */
+  --surface-0: 10 10 10;
+  --surface-1: 17 17 17;
+  --surface-2: 26 26 26;
+  --surface-3: 34 34 34;
+  --surface-4: 42 42 42;
+
+  /* ── Accent (brand) ── */
+  --accent: 245 158 11;
+  --accent-dim: 180 83 9;
+  --accent-bright: 251 191 36;
+
+  /* ── Secondary accent (prestige/alt) ── */
+  --accent-alt: 168 85 247;
+  --accent-alt-dim: 126 34 206;
+  --accent-alt-bright: 192 132 252;
+
+  /* ── Text ── */
+  --txt-primary: 245 245 245;
+  --txt-secondary: 163 163 163;
+  --txt-muted: 82 82 82;
+
+  /* ── Borders ── */
+  --bdr: 38 38 38;
+  --bdr-hover: 64 64 64;
+
+  /* ── Semantic: gamification ── */
+  --color-xp: 245 158 11;
+  --color-prestige: 168 85 247;
+  --color-streak: 249 115 22;
+  --color-success: 16 185 129;
+  --color-danger: 239 68 68;
+  --color-info: 96 165 250;
+  --color-quest: 168 85 247;
+  --color-challenge: 16 185 129;
+
+  /* ── Semantic: journal categories ── */
+  --color-expressive: 168 85 247;
+  --color-gratitude: 245 158 11;
+  --color-reflection: 34 211 238;
+
+  /* ── Glass / glow (full rgba — not decomposed) ── */
+  --glass-bg: rgba(17, 17, 17, 0.75);
+  --glow-color: rgba(var(--accent), 0.2);
+  --glow-color-wide: rgba(var(--accent), 0.08);
+
+  /* ── Typography ── */
+  --font-sans: 'Inter', system-ui, sans-serif;
+}
+
+/* ═══════════════════════════════════════════════
+   PRESET: Tarot / Mystical
+   ═══════════════════════════════════════════════ */
+[data-theme="tarot"] {
+  --surface-0: 13 10 26;
+  --surface-1: 20 15 38;
+  --surface-2: 28 22 50;
+  --surface-3: 38 30 62;
+  --surface-4: 50 40 78;
+
+  --accent: 196 167 71;
+  --accent-dim: 150 128 50;
+  --accent-bright: 224 200 100;
+
+  --accent-alt: 138 90 200;
+  --accent-alt-dim: 100 60 160;
+  --accent-alt-bright: 170 130 230;
+
+  --txt-primary: 232 224 208;
+  --txt-secondary: 170 160 140;
+  --txt-muted: 90 80 65;
+
+  --bdr: 45 35 60;
+  --bdr-hover: 70 55 90;
+
+  --color-xp: 196 167 71;
+  --color-prestige: 138 90 200;
+  --color-streak: 200 140 50;
+  --color-success: 100 180 130;
+  --color-danger: 200 80 80;
+  --color-info: 120 150 220;
+  --color-quest: 138 90 200;
+  --color-challenge: 100 180 130;
+
+  --color-expressive: 138 90 200;
+  --color-gratitude: 196 167 71;
+  --color-reflection: 100 180 200;
+
+  --glass-bg: rgba(20, 15, 38, 0.8);
+
+  --font-sans: 'Cinzel', 'Inter', serif;
+}
+
+/* ═══════════════════════════════════════════════
+   PRESET: Biblical / Devotional
+   ═══════════════════════════════════════════════ */
+[data-theme="biblical"] {
+  --surface-0: 26 21 16;
+  --surface-1: 34 28 22;
+  --surface-2: 44 36 28;
+  --surface-3: 54 44 34;
+  --surface-4: 66 54 42;
+
+  --accent: 139 105 20;
+  --accent-dim: 100 75 15;
+  --accent-bright: 180 140 40;
+
+  --accent-alt: 120 80 40;
+  --accent-alt-dim: 90 60 30;
+  --accent-alt-bright: 160 110 60;
+
+  --txt-primary: 235 225 210;
+  --txt-secondary: 180 165 140;
+  --txt-muted: 100 88 70;
+
+  --bdr: 50 40 30;
+  --bdr-hover: 75 60 45;
+
+  --color-xp: 139 105 20;
+  --color-prestige: 120 80 40;
+  --color-streak: 170 120 30;
+  --color-success: 80 150 100;
+  --color-danger: 180 70 60;
+  --color-info: 100 130 180;
+  --color-quest: 120 80 40;
+  --color-challenge: 80 150 100;
+
+  --color-expressive: 120 80 40;
+  --color-gratitude: 139 105 20;
+  --color-reflection: 80 140 160;
+
+  --glass-bg: rgba(34, 28, 22, 0.8);
+
+  --font-sans: 'EB Garamond', 'Georgia', serif;
+}

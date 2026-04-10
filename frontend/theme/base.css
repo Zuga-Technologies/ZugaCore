@@ -21,15 +21,15 @@
 @layer components {
   .glass-card {
     @apply border border-bdr rounded-xl;
-    background: rgba(17, 17, 17, 0.75);
+    background: var(--glass-bg);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
     will-change: transform;
   }
 
   .glow-accent {
-    box-shadow: 0 0 12px rgba(245, 158, 11, 0.2),
-                0 0 32px rgba(245, 158, 11, 0.08);
+    box-shadow: 0 0 12px rgb(var(--accent) / 0.2),
+                0 0 32px rgb(var(--accent) / 0.08);
   }
 
   .btn-primary {
