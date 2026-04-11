@@ -22,8 +22,8 @@
   .glass-card {
     @apply border border-bdr rounded-xl;
     background: var(--glass-bg);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     will-change: transform;
   }
 
@@ -138,6 +138,22 @@
   }
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
+  }
+
+  /* Paint containment for tab panels — tells browser internal
+     changes cannot affect layout outside this element */
+  .contain-content {
+    contain: content;
+  }
+}
+
+/* Respect prefers-reduced-motion globally */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
