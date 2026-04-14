@@ -351,6 +351,27 @@ async def forgot_password(body: ForgotPasswordRequest) -> MessageResponse:
     return MessageResponse(message="If that email is registered, you'll receive a reset link.")
 
 
+@router.post("/admin/mint-reset-link")
+async def admin_mint_reset_link(
+    body: ForgotPasswordRequest,
+    _admin: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Admin-only: mint a password reset URL to DM to a user directly.
+
+    Bypasses email delivery entirely — useful when iCloud/Outlook filters
+    drop the standard reset email or when onboarding a user out-of-band.
+    """
+    email = body.email.strip().lower()
+    record = await get_user_by_email(email)
+    if record is None:
+        raise HTTPException(status_code=404, detail="No user with that email")
+
+    from core.auth.email_token_store import create_email_token
+    token = await create_email_token(email, "reset")
+    base = os.environ.get("APP_BASE_URL", "https://zugabot.ai")
+    return {"email": email, "url": f"{base}/reset-password?token={token}"}
+
+
 @router.post("/reset-password", response_model=MessageResponse)
 async def reset_password(body: ResetPasswordRequest) -> MessageResponse:
     """Consume a reset token and set a new password. Force-logs out all sessions."""
@@ -596,6 +617,67 @@ class AdminResetRequest(BaseModel):
     email: str
 
 
+class AdminDeleteUserRequest(BaseModel):
+    email: str
+    confirm: str
+
+
+# Tables with a user_id column that should cascade on hard delete.
+# Missing tables are ignored (studio-specific — not every deploy has every table).
+# Keep this list explicit: new tables should opt in, not be discovered dynamically.
+_USER_DEPENDENT_TABLES: tuple[str, ...] = (
+    "chat_sessions",
+    "cloned_repos",
+    "credit_ledger",
+    "crisis_audit_log",
+    "gamer_subscription",
+    "github_connections",
+    "goal_definitions",
+    "habit_definitions",
+    "habit_insights",
+    "habit_logs",
+    "health_exercises",
+    "health_workout_splits",
+    "health_workouts",
+    "image_studio_configs",
+    "journal_entries",
+    "learn_curriculums",
+    "learn_goals",
+    "learn_notes",
+    "learn_quiz_attempts",
+    "learn_quiz_results",
+    "learn_quizzes",
+    "learn_review_cards",
+    "life_cross_studio_signals",
+    "life_daily_challenges",
+    "life_notification_log",
+    "life_notification_preferences",
+    "life_push_subscriptions",
+    "life_user_badges",
+    "life_user_insights",
+    "life_user_settings",
+    "life_user_xp",
+    "life_weekly_narratives",
+    "life_weekly_quests",
+    "life_xp_transactions",
+    "meditation_sessions",
+    "mood_entries",
+    "subscription",
+    "theme_installs",
+    "theme_overrides",
+    "theme_reviews",
+    "theme_states",
+    "therapist_session_notes",
+    "token_balance",
+    "token_transaction",
+    "user_memories",
+    "video_ai_jobs",
+    "video_export_jobs",
+    "video_projects",
+    "webhook_subscriptions",
+)
+
+
 @router.post("/admin/reset-user")
 async def admin_reset_user(
     body: AdminResetRequest,
@@ -631,3 +713,101 @@ async def admin_reset_user(
             pass  # Table may not exist in non-ZugaLife deployments
 
     return {"status": "ok", "email": record.email, "role": new_role, "onboarding_reset": True}
+
+
+@router.post("/admin/delete-user")
+async def admin_delete_user(
+    body: AdminDeleteUserRequest,
+    _admin: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Admin: hard-delete a user from SuperTokens Core + app DB + dependent tables.
+
+    Order: revoke sessions → delete from SuperTokens → cascade dependents → delete
+    app user row. Any failure before the final step leaves a recoverable state
+    (user still in app DB, just logged out). This is a hard delete — there is no
+    soft-delete column. Requires body.confirm to exactly match body.email (typo
+    protection; prevents fat-finger deletes from curl/Postman).
+
+    Returns a manifest of exactly what was removed per store/table.
+    """
+    from sqlalchemy import text
+    from core.database.session import get_session
+    from supertokens_python.asyncio import delete_user as st_delete_user
+
+    email = body.email.strip().lower()
+    if body.confirm.strip().lower() != email:
+        raise HTTPException(status_code=400, detail="confirm must match email exactly")
+
+    record = await get_user_by_email(email)
+    if record is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Guard: don't let an admin delete themselves in one call. Forces the use
+    # of a second admin account for self-removal — same principle as requiring
+    # two ops people to approve prod changes. Cheap, prevents a tired 3am mistake.
+    if record.id == _admin.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing to delete your own account. Use a different admin account.",
+        )
+
+    manifest: dict = {
+        "email": email,
+        "user_id": record.id,
+        "supertokens_user_id": record.supertokens_user_id,
+        "sessions_revoked": False,
+        "supertokens_deleted": False,
+        "related_rows_deleted": {},
+        "app_user_deleted": False,
+    }
+
+    # 1. Revoke active sessions first — kicks any open logins BEFORE we pull
+    #    the auth credential out from under them.
+    if record.supertokens_user_id:
+        try:
+            await revoke_all_sessions_for_user(record.supertokens_user_id)
+            manifest["sessions_revoked"] = True
+        except Exception as exc:
+            logger.warning("Failed to revoke sessions for %s: %s", email, exc)
+
+        # 2. Delete from SuperTokens Core. This wipes credentials + third-party
+        #    linkages in the ST DB. Uses the SDK's delete_user, not a raw REST
+        #    call, so we inherit ST's own cleanup logic.
+        try:
+            await st_delete_user(record.supertokens_user_id)
+            manifest["supertokens_deleted"] = True
+        except Exception as exc:
+            logger.error("Failed to delete SuperTokens user %s: %s", email, exc)
+            raise HTTPException(
+                status_code=502,
+                detail=f"SuperTokens delete failed: {exc}. App user NOT deleted.",
+            )
+
+    # 3. Cascade dependent rows and delete the app user in a single transaction.
+    #    A per-table try/except keeps missing tables from aborting the whole
+    #    operation — studio tables only exist in deployments that use them.
+    async with get_session() as session:
+        for table in _USER_DEPENDENT_TABLES:
+            try:
+                result = await session.execute(
+                    text(f"DELETE FROM {table} WHERE user_id = :uid"),
+                    {"uid": record.id},
+                )
+                if result.rowcount:
+                    manifest["related_rows_deleted"][table] = result.rowcount
+            except Exception as exc:
+                # Table doesn't exist in this deploy, or schema mismatch — skip.
+                logger.debug("Skip cascade for %s (%s): %s", table, email, exc)
+
+        # 4. Finally, remove the app user row itself.
+        await session.execute(
+            text("DELETE FROM users WHERE id = :uid"),
+            {"uid": record.id},
+        )
+        manifest["app_user_deleted"] = True
+
+    logger.warning(
+        "ADMIN DELETE: %s removed user %s (st_id=%s). Manifest: %s",
+        _admin.email, email, record.supertokens_user_id, manifest,
+    )
+    return {"status": "ok", "deleted": manifest}
