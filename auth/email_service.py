@@ -165,3 +165,4 @@ async def _send(to: str, subject: str, html: str) -> None:
         logger.info("Email sent to %s: %s", to, subject)
     except Exception as exc:
         logger.error("Resend failed for %s: %s", to, exc)
+        raise

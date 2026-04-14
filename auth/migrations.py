@@ -11,7 +11,7 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 
-_ALLOWED_TABLES = {"users", "auth_tokens", "email_tokens"}
+_ALLOWED_TABLES = {"users", "email_tokens"}
 
 
 async def _column_exists(db: aiosqlite.Connection, table: str, column: str) -> bool:
