@@ -112,7 +112,17 @@ async def consume_email_token(token: str, purpose: str) -> str | None:
         await db.execute("DELETE FROM email_tokens WHERE token = ?", (token,))
         await db.commit()
         logger.info("Consumed %s token %s… for %s (age=%.0fs)", purpose, token_prefix, row["email"], age)
-        return row["email"]
+        email = row["email"]
+
+    # Opportunistic cleanup — sweeps expired tokens on the happy path so the
+    # table self-tends without a dedicated cron. Best-effort: failure here
+    # must never fail the consumption that just succeeded.
+    try:
+        await cleanup_expired_tokens()
+    except Exception as exc:
+        logger.debug("Opportunistic cleanup failed (non-fatal): %s", exc)
+
+    return email
 
 
 async def cleanup_expired_tokens() -> int:
