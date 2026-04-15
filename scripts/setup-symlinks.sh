@@ -43,11 +43,18 @@ create_link() {
     fi
 
     if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
-        # Windows: must use cmd mklink /d for directory symlinks
+        # Windows: must use cmd mklink /d for directory symlinks.
+        # Use cygpath if available, otherwise fall back to sed-based conversion
+        # (Git Bash doesn't always ship cygpath).
         local win_target
         local win_link
-        win_target="$(cygpath -w "$target")"
-        win_link="$(cygpath -w "$link")"
+        if command -v cygpath >/dev/null 2>&1; then
+            win_target="$(cygpath -w "$target")"
+            win_link="$(cygpath -w "$link")"
+        else
+            win_target="$(echo "$target" | sed 's|^/\([a-zA-Z]\)/|\U\1:/|; s|/|\\|g')"
+            win_link="$(echo "$link" | sed 's|^/\([a-zA-Z]\)/|\U\1:/|; s|/|\\|g')"
+        fi
         cmd //c "mklink /d \"$win_link\" \"$win_target\"" > /dev/null
     else
         # macOS / Linux: regular symlink
@@ -62,10 +69,11 @@ mkdir -p "$BACKEND_CORE"
 
 # Create the 3 backend symlinks
 echo "Backend symlinks:"
-create_link "$CORE_TARGET/auth"     "$BACKEND_CORE/auth"
-create_link "$CORE_TARGET/database" "$BACKEND_CORE/database"
-create_link "$CORE_TARGET/plugins"  "$BACKEND_CORE/plugins"
+create_link "$CORE_TARGET/auth"      "$BACKEND_CORE/auth"
+create_link "$CORE_TARGET/database"  "$BACKEND_CORE/database"
+create_link "$CORE_TARGET/lifecycle" "$BACKEND_CORE/lifecycle"
+create_link "$CORE_TARGET/plugins"   "$BACKEND_CORE/plugins"
 
 echo ""
-echo "Done! Backend can now import from core.auth, core.database, core.plugins"
+echo "Done! Backend can now import from core.auth, core.database, core.lifecycle, core.plugins"
 echo "(Frontend uses Vite resolve.alias — no symlink needed)"
