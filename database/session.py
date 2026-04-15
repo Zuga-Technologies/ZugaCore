@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from core.database.base import Base
+
 # Lazy-initialized by init_engine(). This lets any entry point
 # (ZugaApp, ZugaLife standalone, tests) provide its own database URL
 # without a hard dependency on app.config at import time.
@@ -49,8 +51,6 @@ async def get_session() -> AsyncGenerator[AsyncSession]:
 
 async def init_db() -> None:
     """Create all tables and add missing columns. Called once at startup."""
-    from core.database.base import Base
-
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -59,7 +59,20 @@ async def init_db() -> None:
 
 
 def _add_missing_columns(conn, base) -> None:  # type: ignore[no-untyped-def]
-    """For each model, check if any mapped columns are missing from the DB and add them."""
+    """For each model, check if any mapped columns are missing from the DB and add them.
+
+    SCOPE — additive only. This reconciles model → DB for *new columns* and nothing else:
+      • renames           → treated as drop+add (data loss); not handled here
+      • type changes      → ignored (existing column kept as-is)
+      • column drops      → ignored (orphan columns remain in DB)
+      • constraint / index / FK changes → ignored
+      • cross-table refactors (rename, split, merge) → ignored
+
+    Any schema change outside "add a new column" must be done by hand-written SQL
+    or by adopting a real migration tool (Alembic). Do not extend this function to
+    cover destructive operations — silent destructive auto-migration is how you
+    lose production data.
+    """
     from sqlalchemy import inspect, text
 
     inspector = inspect(conn)
