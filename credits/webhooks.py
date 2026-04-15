@@ -17,12 +17,15 @@ from datetime import datetime, timezone
 
 import stripe
 from fastapi import HTTPException, Request
+from sqlalchemy import select
 
 from core.credits.manager import add_purchased_tokens, add_subscription_tokens, grant_tokens
+from core.credits.models import Subscription, TokenTransaction
 from core.credits.stripe_service import (
     SUBSCRIPTION_TIERS,
     TOPUP_PACKS,
 )
+from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +54,6 @@ async def _already_processed(stripe_id: str, tx_type: str) -> bool:
     """
     if not stripe_id:
         return False
-
-    from core.credits.models import TokenTransaction
-    from core.database.session import get_session
-    from sqlalchemy import select
 
     async with get_session() as session:
         result = await session.execute(
@@ -128,10 +127,6 @@ async def _handle_checkout_completed(session: dict) -> dict:
 
 async def _activate_subscription(session: dict, metadata: dict) -> dict:
     """Create subscription record and credit first cycle tokens."""
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     user_id = metadata["user_id"]
     tier = metadata.get("tier")
     stripe_sub_id = session.get("subscription")
@@ -149,18 +144,17 @@ async def _activate_subscription(session: dict, metadata: dict) -> dict:
         logger.info("Duplicate subscription webhook skipped: %s", stripe_sub_id)
         return {"status": "already_processed"}
 
-    # Get subscription period from Stripe
+    # Get subscription period from Stripe. If the API is unreachable, let
+    # the exception propagate — a 500 response tells Stripe to retry the
+    # webhook, which is better than writing a half-populated row that the
+    # idempotency check would then block from ever being corrected.
     _init_stripe()
     period_start = None
     period_end = None
     if stripe_sub_id:
-        try:
-            sub_obj = stripe.Subscription.retrieve(stripe_sub_id)
-            period_start = datetime.fromtimestamp(sub_obj.current_period_start, tz=timezone.utc)
-            period_end = datetime.fromtimestamp(sub_obj.current_period_end, tz=timezone.utc)
-        except Exception as e:
-            logger.warning("Could not fetch subscription period: %s", e)
-            period_start = datetime.now(timezone.utc)
+        sub_obj = stripe.Subscription.retrieve(stripe_sub_id)
+        period_start = datetime.fromtimestamp(sub_obj.current_period_start, tz=timezone.utc)
+        period_end = datetime.fromtimestamp(sub_obj.current_period_end, tz=timezone.utc)
 
     # Upsert subscription record
     async with get_session() as session_db:
@@ -245,10 +239,6 @@ async def _handle_invoice_paid(invoice: dict) -> dict:
     This fires for every successful subscription payment AFTER the first one
     (the first payment triggers checkout.session.completed instead).
     """
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     stripe_sub_id = invoice.get("subscription")
     if not stripe_sub_id:
         return {"status": "ignored", "reason": "no subscription on invoice"}
@@ -304,10 +294,6 @@ async def _handle_invoice_paid(invoice: dict) -> dict:
 
 async def _handle_subscription_updated(subscription: dict) -> dict:
     """Handle customer.subscription.updated — tier changes, cancellation scheduling."""
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     stripe_sub_id = subscription.get("id")
     cancel_at_period_end = subscription.get("cancel_at_period_end", False)
     status = subscription.get("status")  # "active", "past_due", "canceled", etc.
@@ -323,8 +309,15 @@ async def _handle_subscription_updated(subscription: dict) -> dict:
             logger.debug("Subscription updated for unknown sub: %s", stripe_sub_id)
             return {"status": "ignored", "reason": "subscription not in our DB"}
 
-        # "cancelling" = user scheduled cancellation, still active until period end
-        # "cancelled" is only set by subscription.deleted when it actually ends
+        # Status dispatch — "cancelling" = user scheduled cancellation, still
+        # active until period end; "cancelled"/"expired" is set by
+        # subscription.deleted when it actually ends.
+        #
+        # Scope note: this handles only the statuses produced by the product's
+        # current Stripe features (active, past_due, cancel-at-period-end).
+        # Statuses NOT handled — trialing, incomplete, paused, unpaid — silently
+        # leave sub.status unchanged. When you enable trials or pause-collection
+        # in Stripe, extend this block to cover them.
         if cancel_at_period_end:
             sub.status = "cancelling"
         elif status == "past_due":
@@ -332,14 +325,17 @@ async def _handle_subscription_updated(subscription: dict) -> dict:
         elif status == "active":
             sub.status = "active"
 
-            # Check for tier change via metadata — cross-reference with server config
-            meta = subscription.get("metadata", {})
-            new_tier = meta.get("tier")
-            if new_tier and new_tier in SUBSCRIPTION_TIERS and new_tier != sub.tier:
-                old_tier = sub.tier
-                sub.tier = new_tier
-                sub.tokens_per_cycle = SUBSCRIPTION_TIERS[new_tier]["tokens"]
-                logger.info("Tier changed: user=%s %s -> %s", sub.user_id, old_tier, new_tier)
+        # Check for tier change regardless of status. A past_due user who
+        # upgrades via the Stripe Dashboard should still have the tier recorded
+        # in our DB, otherwise their token allocation stays stuck at the old
+        # tier until the next invoice.paid cycle catches up.
+        meta = subscription.get("metadata", {})
+        new_tier = meta.get("tier")
+        if new_tier and new_tier in SUBSCRIPTION_TIERS and new_tier != sub.tier:
+            old_tier = sub.tier
+            sub.tier = new_tier
+            sub.tokens_per_cycle = SUBSCRIPTION_TIERS[new_tier]["tokens"]
+            logger.info("Tier changed: user=%s %s -> %s", sub.user_id, old_tier, new_tier)
 
         # Update period
         if subscription.get("current_period_start"):
@@ -357,10 +353,6 @@ async def _handle_subscription_updated(subscription: dict) -> dict:
 
 async def _handle_subscription_deleted(subscription: dict) -> dict:
     """Handle customer.subscription.deleted — subscription fully ended."""
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     stripe_sub_id = subscription.get("id")
 
     async with get_session() as session:
@@ -379,10 +371,6 @@ async def _handle_subscription_deleted(subscription: dict) -> dict:
 
 async def _handle_payment_failed(payment_intent: dict) -> dict:
     """Handle payment_intent.payment_failed — flag subscription as past_due."""
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     invoice_id = payment_intent.get("invoice")
     if not invoice_id:
         return {"status": "ignored", "reason": "no invoice on payment_intent"}

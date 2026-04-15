@@ -1,15 +1,22 @@
 """ZugaTokens API routes — balance, history, purchases, Stripe checkout, admin views, and S2S reporting."""
 
+import hashlib
+import hmac
+import json
 import logging
 import os
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from core.auth.middleware import get_current_user, require_admin
-from core.auth.models import CurrentUser
+from core.auth.models import CurrentUser, UserRecord
+from core.auth.repository import _is_admin_email
 from core.credits.manager import (
+    _get_welcome_tokens,
     add_purchased_tokens,
     add_subscription_tokens,
     can_spend,
@@ -20,8 +27,10 @@ from core.credits.manager import (
     grant_tokens,
     record_spend,
     set_test_tier,
+    tokens_to_dollars,
     TEST_EMAIL,
 )
+from core.credits.models import TokenBalance, TokenTransaction
 from core.credits.stripe_service import (
     cancel_subscription,
     create_checkout_subscription,
@@ -30,6 +39,7 @@ from core.credits.stripe_service import (
     get_subscription_status,
 )
 from core.credits.webhooks import handle_stripe_webhook
+from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["tokens"])
@@ -43,6 +53,35 @@ def _verify_service_key(x_service_key: str = Header(alias="X-Service-Key")) -> s
     if not expected or x_service_key != expected:
         raise HTTPException(status_code=403, detail="Invalid service key")
     return x_service_key
+
+
+# ── Overlay HMAC auth ────────────────────────────────────────────────────
+
+def _verify_overlay_hmac(
+    user_id: str,
+    signature: str,
+    timestamp_str: str,
+    secret: str,
+) -> None:
+    """Verify an overlay HMAC signature. Raises HTTPException 401 on any failure.
+
+    Callers are responsible for deciding whether to attempt HMAC verification
+    (e.g., only when all three inputs are present) vs. falling back to other
+    auth methods. This helper only runs the core verification: timestamp
+    parsing, 5-minute freshness window, and constant-time signature compare.
+    """
+    try:
+        timestamp = int(timestamp_str)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid timestamp")
+    if abs(int(time.time()) - timestamp) > 300:
+        raise HTTPException(status_code=401, detail="Request expired")
+    message = f"{user_id}:{timestamp}"
+    expected = hmac.new(
+        secret.encode(), message.encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=401, detail="Invalid signature")
 
 
 # ── User-Facing Token Endpoints ──────────────────────────────────────────
@@ -67,32 +106,16 @@ async def gamer_balance(request: Request) -> dict:
     The Overlay can't easily maintain a browser session, so this endpoint
     accepts HMAC-signed requests (X-App-Signature + X-Timestamp + X-User-Id).
     """
-    import hashlib
-    import hmac as hmac_mod
-    import time
-
     user_id = request.headers.get("X-User-Id", "").strip()
     if not user_id:
         raise HTTPException(status_code=401, detail="Missing X-User-Id header")
 
-    # Verify HMAC signature
     signature = request.headers.get("X-App-Signature", "")
     timestamp_str = request.headers.get("X-Timestamp", "")
     secret = os.environ.get("OVERLAY_APP_SECRET", "").strip()
 
     if signature and timestamp_str and secret:
-        try:
-            timestamp = int(timestamp_str)
-        except ValueError:
-            raise HTTPException(status_code=401, detail="Invalid timestamp")
-        if abs(int(time.time()) - timestamp) > 300:
-            raise HTTPException(status_code=401, detail="Request expired")
-        message = f"{user_id}:{timestamp}"
-        expected = hmac_mod.new(
-            secret.encode(), message.encode(), hashlib.sha256
-        ).hexdigest()
-        if not hmac_mod.compare_digest(expected, signature):
-            raise HTTPException(status_code=401, detail="Invalid signature")
+        _verify_overlay_hmac(user_id, signature, timestamp_str, secret)
     else:
         # No HMAC — require service key as fallback
         service_key = request.headers.get("X-Service-Key", "")
@@ -323,10 +346,6 @@ async def overlay_token_spend(body: OverlaySpendRequest, request: Request) -> di
       - Session auth (logged-in user)
       - HMAC signature (X-App-Signature + X-Timestamp) from Overlay
     """
-    import hashlib
-    import hmac as hmac_mod
-    import time
-
     user_id = request.headers.get("X-User-Id", "").strip()
 
     # Try session auth first
@@ -346,18 +365,7 @@ async def overlay_token_spend(body: OverlaySpendRequest, request: Request) -> di
     if signature and timestamp_str:
         secret = os.environ.get("OVERLAY_APP_SECRET", "").strip()
         if secret:
-            try:
-                timestamp = int(timestamp_str)
-            except ValueError:
-                raise HTTPException(status_code=401, detail="Invalid timestamp")
-            if abs(int(time.time()) - timestamp) > 300:
-                raise HTTPException(status_code=401, detail="Request expired")
-            message = f"{user_id}:{timestamp}"
-            expected = hmac_mod.new(
-                secret.encode(), message.encode(), hashlib.sha256
-            ).hexdigest()
-            if not hmac_mod.compare_digest(expected, signature):
-                raise HTTPException(status_code=401, detail="Invalid signature")
+            _verify_overlay_hmac(user_id, signature, timestamp_str, secret)
         # Signature valid — proceed
     else:
         # No signature — require session auth
@@ -371,10 +379,6 @@ async def overlay_token_spend(body: OverlaySpendRequest, request: Request) -> di
             raise HTTPException(status_code=401, detail="Authentication required")
 
     # Look up email for the user
-    from core.database.session import get_session
-    from core.auth.models import UserRecord
-    from sqlalchemy import select
-
     email = ""
     try:
         async with get_session() as session:
@@ -386,7 +390,6 @@ async def overlay_token_spend(body: OverlaySpendRequest, request: Request) -> di
         pass
 
     # Estimate raw cost from tokens (reverse the 3x markup)
-    from core.credits.manager import tokens_to_dollars
     cost_usd = tokens_to_dollars(body.amount)
 
     await record_spend(
@@ -440,10 +443,9 @@ async def report_spend(
 ) -> dict:
     """Record a token spend from a standalone studio. Service-to-service only."""
     # Cap metadata size to prevent storage amplification
-    import json as _json
     meta = body.metadata
     if meta:
-        serialized = _json.dumps(meta)
+        serialized = json.dumps(meta)
         if len(serialized) > 4096:
             meta = {"truncated": True, "original_keys": list(meta.keys())[:20]}
 
@@ -470,10 +472,6 @@ async def cli_list_users(
     _key: str = Depends(_verify_service_key),
 ) -> dict:
     """CLI: List all registered users with their roles and balances."""
-    from core.auth.models import UserRecord
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     async with get_session() as session:
         result = await session.execute(
             select(UserRecord).order_by(UserRecord.created_at)
@@ -504,10 +502,6 @@ async def cli_usage_report(
     all_usage = await get_all_usage(days=days)
 
     # Enrich with user names
-    from core.auth.models import UserRecord
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     async with get_session() as session:
         result = await session.execute(select(UserRecord))
         users = {u.id: u for u in result.scalars().all()}
@@ -545,10 +539,6 @@ async def cli_user_audit(
     transactions = await get_transaction_history(user_id, limit=limit)
 
     # Get user info
-    from core.auth.models import UserRecord
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     async with get_session() as session:
         result = await session.execute(
             select(UserRecord).where(UserRecord.id == user_id)
@@ -576,11 +566,6 @@ async def cli_sync_roles(
 
     Updates any user whose DB role doesn't match what ADMIN_EMAILS says.
     """
-    from core.auth.models import UserRecord
-    from core.auth.repository import _is_admin_email
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     updated = []
     async with get_session() as session:
         result = await session.execute(select(UserRecord))
@@ -608,11 +593,6 @@ async def cli_reset_free_tokens(
 
     Used to correct balances after an env var misconfiguration.
     """
-    from core.credits.models import TokenBalance, TokenTransaction
-    from core.database.session import get_session
-    from core.credits.manager import _get_welcome_tokens
-    from sqlalchemy import select
-
     target = _get_welcome_tokens()
     updated = []
 

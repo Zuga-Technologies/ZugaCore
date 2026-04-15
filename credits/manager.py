@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
-from core.credits.models import CreditLedger, TokenBalance, TokenTransaction
+from core.credits.models import CreditLedger, Subscription, TokenBalance, TokenTransaction
 from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,33 @@ async def _get_or_create_balance(
         logger.info(
             "Created token balance for user %s with %s welcome tokens (grant=%s)",
             user_id, welcome, grant_welcome,
+        )
+
+    # Expire rollover tokens whose 31-day deadline has passed.
+    # Applies to active + canceled subscribers alike — spec is calendar-only.
+    if (
+        balance.sub_rollover > 0
+        and balance.sub_rollover_exp is not None
+        and balance.sub_rollover_exp < datetime.now(timezone.utc)
+    ):
+        expired_amount = balance.sub_rollover
+        balance.sub_rollover = 0
+        balance.sub_rollover_exp = None
+        total_after = (
+            balance.free_tokens + balance.sub_tokens
+            + balance.sub_rollover + balance.purchased_tokens
+        )
+        session.add(TokenTransaction(
+            user_id=user_id,
+            type="expire",
+            amount=-expired_amount,
+            source="subscription_rollover",
+            reason="rollover_expired",
+            balance_after=total_after,
+        ))
+        logger.info(
+            "Expired %s rollover tokens for user %s (deadline passed)",
+            expired_amount, user_id,
         )
 
     return balance
@@ -550,8 +577,6 @@ async def set_test_tier(user_id: str, email: str, tier: str) -> dict:
     Only works for the designated test email. Sets subscription tokens
     and creates/updates the Subscription record to simulate real tier state.
     """
-    from core.credits.models import Subscription
-
     if not TEST_EMAIL or email.lower() != TEST_EMAIL.lower():
         raise ValueError("set_test_tier is restricted to the designated test account")
 
