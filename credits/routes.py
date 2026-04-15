@@ -223,35 +223,6 @@ async def stripe_webhook(request: Request) -> dict:
     return await handle_stripe_webhook(request)
 
 
-# ── Legacy Credit Endpoints (backward compat) ───────────────────────────
-
-@router.get("/api/credits/usage")
-async def legacy_usage(
-    days: Annotated[int, Query(ge=1, le=365)] = 30,
-    user: CurrentUser = Depends(get_current_user),
-) -> dict:
-    """Legacy endpoint — returns usage in ZugaToken format now."""
-    usage = await get_usage(user.id, days=days)
-    # Map to old field names for TopNav compat until frontend is updated
-    return {
-        "user_id": usage["user_id"],
-        "period_days": usage["period_days"],
-        "total_credits": usage["total_tokens"],  # legacy field name
-        "total_usd": usage["total_usd"],
-        "total_calls": usage["total_calls"],
-        "by_service": usage["by_service"],
-    }
-
-
-@router.get("/api/credits/usage/all")
-async def legacy_all_usage(
-    days: Annotated[int, Query(ge=1, le=365)] = 30,
-    user: CurrentUser = Depends(require_admin),
-) -> list[dict]:
-    """Legacy endpoint — admin usage view."""
-    return await get_all_usage(days=days)
-
-
 # ── Admin Token Endpoints ────────────────────────────────────────────────
 
 class GrantTokensRequest(BaseModel):
@@ -299,11 +270,6 @@ async def admin_grant(
     user: CurrentUser = Depends(require_admin),
 ) -> dict:
     """Admin: grant bonus tokens to a user."""
-    if body.amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be positive")
-    if body.amount > 100_000:
-        raise HTTPException(status_code=400, detail="Grant amount too large (max 100k)")
-
     result = await grant_tokens(body.user_id, body.amount, body.reason)
     logger.info("Admin %s granted %s tokens to %s", user.email, body.amount, body.user_id)
     return result
