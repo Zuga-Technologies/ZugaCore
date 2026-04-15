@@ -1,3 +1,26 @@
+"""Studio plugin contracts — the abstract base classes every studio inherits from.
+
+ZugaCore only defines the contracts here. The actual plugin discovery and
+registration code lives in ZugaApp/backend/plugins/loader.py, which walks
+each studio's directory looking for a plugin.py file, imports it, and
+dispatches on StudioPlugin vs ProxyPlugin via isinstance checks.
+
+Two plugin types:
+
+    StudioPlugin — runs inside ZugaApp, shares its database. Use for
+                   feature studios like ZugaLife, ZugaLearn, ZugaAudio
+                   where the frontend is the product and the backend
+                   lives in the same process.
+
+    ProxyPlugin  — forwards requests to a standalone backend running in
+                   its own process. Use for studios like ZugaTrader or
+                   ZugaOverseer that need their own runtime (24/7 daemons,
+                   separate deployment cadence, independent scaling).
+
+Studios subclass one of these in their plugin.py and fill in the abstract
+properties. Everything else has sensible defaults.
+"""
+
 from abc import ABC, abstractmethod
 
 from fastapi import APIRouter
