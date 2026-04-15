@@ -13,28 +13,27 @@ Usage:
 import asyncio
 import logging
 import os
+import re
 import signal
 import time
-from typing import Optional
 
 from fastapi import FastAPI, APIRouter
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-logger = logging.getLogger("lifecycle")
+logger = logging.getLogger(__name__)
 
 # Module-level state shared across the middleware and endpoint
 _draining = False
 _in_flight = 0
-_drain_event: Optional[asyncio.Event] = None
 
-# Paths that always pass through during drain
-_PASSTHROUGH_PATTERNS = ("/health/", "/lifecycle/")
-
-
-def is_draining() -> bool:
-    return _draining
+# Paths that always pass through during drain. Path-segment aware so that
+# BOTH /api/<studio>/health AND /api/health/live match correctly. The
+# previous substring match on "/health/" missed bare /health endpoints and
+# silently broke graceful drain during deploys for any studio using that
+# naming convention (ZugaAudio, ZugaImage, ZugaApp shield, etc.).
+_PASSTHROUGH_RE = re.compile(r"(^|/)(health|lifecycle)(/|$)")
 
 
 def request_shutdown():
@@ -53,7 +52,7 @@ class DrainMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         # Always allow health and lifecycle endpoints through
-        if any(pattern in path for pattern in _PASSTHROUGH_PATTERNS):
+        if _PASSTHROUGH_RE.search(path):
             return await call_next(request)
 
         # If draining, reject new requests
