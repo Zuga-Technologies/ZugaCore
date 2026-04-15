@@ -27,6 +27,8 @@ import abc
 import logging
 import os
 
+from core.credits.manager import can_spend, record_spend, try_spend
+
 logger = logging.getLogger(__name__)
 
 ZUGATOKENS_PER_DOLLAR = 100
@@ -86,7 +88,6 @@ class DirectCreditClient(CreditClient):
     """
 
     async def can_spend(self, user_id: str, email: str, estimated_tokens: float = 0) -> bool:
-        from core.credits.manager import can_spend
         return await can_spend(user_id, email, estimated_tokens)
 
     async def record_spend(
@@ -99,7 +100,6 @@ class DirectCreditClient(CreditClient):
         model: str | None = None,
         metadata: dict | None = None,
     ) -> None:
-        from core.credits.manager import record_spend
         await record_spend(
             user_id=user_id,
             tokens=tokens,
@@ -121,7 +121,6 @@ class DirectCreditClient(CreditClient):
         model: str | None = None,
         metadata: dict | None = None,
     ) -> bool:
-        from core.credits.manager import try_spend
         return await try_spend(
             user_id=user_id,
             email=email,

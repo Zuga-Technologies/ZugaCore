@@ -13,8 +13,13 @@ Usage:
 
 import logging
 import os
+import time
 
 import stripe
+from sqlalchemy import select
+
+from core.credits.models import Subscription
+from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +131,6 @@ async def get_or_create_customer(user_id: str, email: str) -> str:
 
 async def _get_stored_customer_id(user_id: str) -> str | None:
     """Look up stripe_cust_id from our subscription table."""
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     async with get_session() as session:
         result = await session.execute(
             select(Subscription.stripe_cust_id).where(Subscription.user_id == user_id)
@@ -138,16 +139,17 @@ async def _get_stored_customer_id(user_id: str) -> str | None:
 
 
 async def _store_customer_id(user_id: str, customer_id: str) -> None:
-    """Store stripe_cust_id in subscription table (upsert).
+    """Backfill stripe_cust_id on an existing Subscription row that lacks one.
 
-    If no subscription row exists yet, we don't create one here —
-    the webhook handler creates it when the subscription actually starts.
-    We just update existing rows.
+    This is a best-effort cache. It writes ONLY when a Subscription row
+    exists AND its stripe_cust_id is currently None. It does NOT insert
+    new rows — those come from the checkout.session.completed webhook
+    in webhooks.py::_activate_subscription.
+
+    No-op cases (both intentional):
+        - No Subscription row yet → the webhook will create one with the id
+        - Existing row already has stripe_cust_id → trust the stored value
     """
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     async with get_session() as session:
         result = await session.execute(
             select(Subscription).where(Subscription.user_id == user_id)
@@ -175,10 +177,6 @@ async def create_checkout_subscription(
         raise ValueError(f"Invalid tier: {tier}. Must be one of {list(SUBSCRIPTION_TIERS.keys())}")
 
     # Prevent duplicate subscriptions — one active sub per account
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     async with get_session() as session_db:
         result = await session_db.execute(
             select(Subscription).where(
@@ -281,10 +279,6 @@ async def create_portal_session(user_id: str, email: str, return_url: str) -> st
 
 async def cancel_subscription(user_id: str) -> dict:
     """Cancel a user's subscription at period end (they keep tokens until expiry)."""
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     _init_stripe()
 
     async with get_session() as session:
@@ -318,10 +312,6 @@ async def cancel_subscription(user_id: str) -> dict:
 
 async def get_subscription_status(user_id: str) -> dict | None:
     """Get a user's current subscription status. Returns None if no subscription."""
-    from core.credits.models import Subscription
-    from core.database.session import get_session
-    from sqlalchemy import select
-
     async with get_session() as session:
         result = await session.execute(
             select(Subscription).where(Subscription.user_id == user_id)
@@ -342,9 +332,6 @@ async def get_subscription_status(user_id: str) -> dict | None:
 
 # ── Product Catalog (for frontend) ──────────────────────────────────
 
-# Simple in-memory cache for Stripe prices (avoids hitting Stripe on every page load)
-import time as _time
-
 _price_cache: dict[str, int] = {}  # price_id → unit_amount (cents)
 _price_cache_ts: float = 0
 _PRICE_CACHE_TTL = 300  # 5 minutes
@@ -354,7 +341,7 @@ def _fetch_stripe_price(price_id: str) -> int | None:
     """Fetch a price's unit_amount from Stripe, with 5-minute cache."""
     global _price_cache, _price_cache_ts
 
-    now = _time.time()
+    now = time.time()
     if now - _price_cache_ts > _PRICE_CACHE_TTL:
         _price_cache.clear()
         _price_cache_ts = now
