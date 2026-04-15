@@ -98,17 +98,6 @@ def tokens_to_dollars(tokens: float) -> float:
     return tokens / (markup * ZUGATOKENS_PER_DOLLAR)
 
 
-# Legacy helpers (kept for old code paths)
-def dollars_to_credits(usd: float) -> float:
-    """Legacy: convert USD to old credits. Use dollars_to_tokens() for new code."""
-    return usd * DOLLARS_TO_CREDITS
-
-
-def credits_to_dollars(credits: float) -> float:
-    """Legacy: convert old credits to USD."""
-    return credits / DOLLARS_TO_CREDITS
-
-
 # ── Wallet Operations ────────────────────────────────────────────────
 
 async def _get_or_create_balance(
@@ -143,8 +132,6 @@ async def _get_or_create_balance(
         )
 
     return balance
-
-
 
 
 
@@ -238,7 +225,6 @@ async def can_spend(user_id: str, email: str, estimated_tokens: float = 0) -> bo
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
 
-
         total = (
             balance.free_tokens
             + balance.sub_tokens
@@ -284,7 +270,6 @@ async def try_spend(
     async with lock:
         async with get_session() as session:
             balance = await _get_or_create_balance(session, user_id)
-    
 
             total = (
                 balance.free_tokens
@@ -378,7 +363,6 @@ async def get_balance(user_id: str) -> dict:
     """Get a user's current token balance across all wallets."""
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
-
 
         return {
             "user_id": user_id,

@@ -44,11 +44,6 @@ def dollars_to_tokens(usd: float) -> float:
     return usd * _get_markup_multiplier() * ZUGATOKENS_PER_DOLLAR
 
 
-# Legacy alias
-def dollars_to_credits(usd: float) -> float:
-    return usd * 1000
-
-
 class CreditClient(abc.ABC):
     """Abstract token client — same interface for all modes."""
 
@@ -326,9 +321,3 @@ def get_credit_client() -> CreditClient:
     logger.info("Token client: Null mode (logging only)")
     _instance = NullCreditClient()
     return _instance
-
-
-def reset_credit_client() -> None:
-    """Reset the singleton (for testing)."""
-    global _instance
-    _instance = None
