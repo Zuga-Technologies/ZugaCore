@@ -28,6 +28,7 @@ from core.credits.manager import (
     record_spend,
     set_test_tier,
     tokens_to_dollars,
+    try_spend,
     TEST_EMAIL,
 )
 from core.credits.models import TokenBalance, TokenTransaction
@@ -392,14 +393,28 @@ async def overlay_token_spend(body: OverlaySpendRequest, request: Request) -> di
     # Estimate raw cost from tokens (reverse the 3x markup)
     cost_usd = tokens_to_dollars(body.amount)
 
-    await record_spend(
+    # Atomic check-and-deduct: holds a per-user lock across check + deduct
+    # so two concurrent overlay spends for the same user can't both pass and
+    # drain the wallet below zero. Returns False if insufficient tokens.
+    success = await try_spend(
         user_id=user_id,
+        email=email,
         tokens=body.amount,
         cost_usd=cost_usd,
         service=body.source,
         reason=body.reason,
         model=None,
     )
+    if not success:
+        balance = await get_balance(user_id)
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "insufficient_tokens",
+                "requested": body.amount,
+                "balance": balance,
+            },
+        )
 
     balance = await get_balance(user_id)
     return {"recorded": True, "balance": balance}
