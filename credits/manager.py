@@ -50,9 +50,6 @@ def _get_user_lock(user_id: str) -> asyncio.Lock:
 
 ZUGATOKENS_PER_DOLLAR = 100  # 1 ZugaToken = $0.01
 
-# Legacy constant kept for backward compatibility with old ledger entries
-DOLLARS_TO_CREDITS = 1000
-
 
 def _get_markup_multiplier() -> float:
     """Get the markup multiplier from env or default to 3x."""
@@ -115,11 +112,9 @@ async def _get_or_create_balance(
 
     if balance is None:
         welcome = _get_welcome_tokens() if grant_welcome else 0
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         balance = TokenBalance(
             user_id=user_id,
             free_tokens=welcome,
-            free_tokens_date=today,
             sub_tokens=0,
             sub_rollover=0,
             purchased_tokens=0,
@@ -330,17 +325,15 @@ async def try_spend(
             ))
 
             # Write raw cost audit trail
-            markup = _get_markup_multiplier()
             session.add(CreditLedger(
                 user_id=user_id,
-                amount=cost_usd * DOLLARS_TO_CREDITS,
+                amount=0,  # bridge value — see model docstring
                 cost_usd=cost_usd,
                 service=service,
                 model=model,
                 reason=reason,
                 metadata_json=json.dumps(metadata) if metadata else None,
                 tokens_charged=tokens,
-                markup_multiplier=markup,
             ))
 
         logger.debug(
@@ -356,17 +349,15 @@ async def _record_admin_spend(
 ) -> None:
     """Record an admin's spend for audit purposes without deducting tokens."""
     async with get_session() as session:
-        markup = _get_markup_multiplier()
         session.add(CreditLedger(
             user_id=user_id,
-            amount=cost_usd * DOLLARS_TO_CREDITS,
+            amount=0,  # bridge value — see model docstring
             cost_usd=cost_usd,
             service=service,
             model=model,
             reason=reason,
             metadata_json=json.dumps(metadata) if metadata else None,
             tokens_charged=tokens,
-            markup_multiplier=markup,
         ))
     logger.debug("Admin spend (audit only): user=%s tokens=%.1f ($%.4f)", user_id, tokens, cost_usd)
 
@@ -445,17 +436,15 @@ async def record_spend(
         ))
 
         # Write raw cost audit trail (credit_ledger — append-only)
-        markup = _get_markup_multiplier()
         session.add(CreditLedger(
             user_id=user_id,
-            amount=cost_usd * DOLLARS_TO_CREDITS,  # legacy credits field
+            amount=0,  # bridge value — see model docstring
             cost_usd=cost_usd,
             service=service,
             model=model,
             reason=reason,
             metadata_json=json.dumps(metadata) if metadata else None,
             tokens_charged=tokens,
-            markup_multiplier=markup,
         ))
 
     logger.debug(

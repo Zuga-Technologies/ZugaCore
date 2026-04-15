@@ -5,7 +5,7 @@ Markup: 3x on raw AI cost (configurable via ZUGATOKEN_MARKUP env var)
 
 Tables:
     credit_ledger    — Raw cost audit trail (append-only, unchanged from v1)
-    token_balance    — Per-user wallet: free daily + subscription + purchased buckets
+    token_balance    — Per-user wallet: welcome grant + subscription + purchased buckets
     token_transaction — Every token add/deduct gets a row (accounting ledger)
     subscription     — Stripe subscription state per user
 """
@@ -32,16 +32,16 @@ class CreditLedger(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(255), index=True)
-    amount: Mapped[float] = mapped_column(Float)  # legacy credits (kept for backcompat)
+    # Bridge value: kept in the ORM to satisfy the existing NOT NULL constraint
+    # in legacy databases. New rows are written with amount=0. Will be removed
+    # entirely once scripts/migrations/drop_dead_credit_columns.sql is run.
+    amount: Mapped[float] = mapped_column(Float)
     cost_usd: Mapped[float] = mapped_column(Float)  # raw dollar cost from provider
     service: Mapped[str] = mapped_column(String(64))  # "anthropic", "venice", "openai", etc.
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     reason: Mapped[str] = mapped_column(String(255))  # "therapist", "meditation", "chat", etc.
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # New fields for ZugaTokens
     tokens_charged: Mapped[float | None] = mapped_column(Float, nullable=True)  # ZugaTokens deducted
-    markup_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True, default=3.0)
 
 
 # ── Token Wallet ──────────────────────────────────────────────────────
@@ -61,7 +61,6 @@ class TokenBalance(Base, TimestampMixin):
 
     # Free welcome grant tokens (one-time, no refill)
     free_tokens: Mapped[float] = mapped_column(Float, default=0)
-    free_tokens_date: Mapped[str | None] = mapped_column(String(10), nullable=True)  # "2026-03-21"
 
     # Subscription tokens (monthly allocation)
     sub_tokens: Mapped[float] = mapped_column(Float, default=0)
