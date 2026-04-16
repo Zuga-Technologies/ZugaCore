@@ -37,31 +37,46 @@ create_link() {
     local link="$2"
     local name="$(basename "$link")"
 
-    # Remove existing (broken symlink, file, or directory)
-    if [ -L "$link" ] || [ -e "$link" ]; then
+    # Safe remove. Symlinks use `rm -f` (never follows the link); real
+    # files/dirs use `rm -rf`. The old unified `rm -rf "$link"` could
+    # descend into the symlink's target on MSYS Windows when the stored
+    # target string ended with '/', silently nuking the canonical ZugaCore
+    # directory. Splitting the two cases avoids that class of accident.
+    if [ -L "$link" ]; then
+        rm -f "$link"
+    elif [ -e "$link" ]; then
         rm -rf "$link"
     fi
 
+    # Compute relative target from the link's parent directory so the
+    # stored symlink is portable across machines (Buga desktop, Mac Mini,
+    # Linux CI, fresh clones). Matches the `credits` symlink convention
+    # already tracked in ZugaApp. Python's os.path.relpath works
+    # identically on all three OSes — same dep already used by
+    # vendor-core.sh for .gitmodules / .gitignore rewrites.
+    local rel_target
+    rel_target="$(python -c "import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]).replace(os.sep, '/'))" "$target" "$(dirname "$link")")"
+
     if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
-        # Windows: must use cmd mklink /d for directory symlinks.
-        # Use cygpath if available, otherwise fall back to sed-based conversion
-        # (Git Bash doesn't always ship cygpath).
-        local win_target
+        # Windows: mklink /d accepts relative paths; backslashes required.
+        # NOTE: mklink.exe still needs admin or Developer Mode to create
+        # new symlinks. If this fails, prefer the git-tracked symlink
+        # pattern (see ZugaApp's credits/lifecycle): git update-index
+        # --add --cacheinfo 120000,<hash>,<path> then git checkout.
         local win_link
         if command -v cygpath >/dev/null 2>&1; then
-            win_target="$(cygpath -w "$target")"
             win_link="$(cygpath -w "$link")"
         else
-            win_target="$(echo "$target" | sed 's|^/\([a-zA-Z]\)/|\U\1:/|; s|/|\\|g')"
             win_link="$(echo "$link" | sed 's|^/\([a-zA-Z]\)/|\U\1:/|; s|/|\\|g')"
         fi
-        cmd //c "mklink /d \"$win_link\" \"$win_target\"" > /dev/null
+        local win_rel_target="${rel_target//\//\\}"
+        cmd //c "mklink /d \"$win_link\" \"$win_rel_target\"" > /dev/null
     else
-        # macOS / Linux: regular symlink
-        ln -s "$target" "$link"
+        # macOS / Linux: ln -s accepts relative paths directly.
+        ln -s "$rel_target" "$link"
     fi
 
-    echo "  $name -> $target"
+    echo "  $name -> $rel_target"
 }
 
 # Ensure backend/core directory exists
