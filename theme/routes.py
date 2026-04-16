@@ -10,20 +10,22 @@ Service-to-service (Zugabot → ZugaApp):
   POST   /api/theme/internal/apply      → upsert override via service key
 """
 
-import os
+import hmac
 import logging
+import os
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth.middleware import get_current_user
 from core.auth.models import CurrentUser
 from core.database.session import get_session
 from core.theme.models import ThemeOverride
 from core.theme.schemas import (
+    InternalApplyThemeRequest,
     ThemeOverrideResponse,
     ThemeOverrideUpsert,
-    InternalApplyThemeRequest,
     VALID_SCOPES,
 )
 
@@ -32,6 +34,51 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/theme", tags=["theme"])
 
 _SERVICE_KEY = os.environ.get("ZUGABOT_SERVICE_KEY", "")
+
+
+def _validate_scope(scope: str) -> None:
+    if scope not in VALID_SCOPES:
+        raise HTTPException(400, f"Invalid scope. Allowed: {sorted(VALID_SCOPES)}")
+
+
+async def _upsert_theme_override(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    scope: str,
+    css_override: str,
+    theme_name: str,
+    font: str | None,
+    preset_id: str | None,
+) -> ThemeOverride:
+    """Fetch existing (user_id, scope) row and mutate, or create new."""
+    result = await session.execute(
+        select(ThemeOverride).where(
+            ThemeOverride.user_id == user_id,
+            ThemeOverride.scope == scope,
+        )
+    )
+    override = result.scalar_one_or_none()
+
+    if override:
+        override.css_override = css_override
+        override.theme_name = theme_name
+        override.font = font
+        override.preset_id = preset_id
+    else:
+        override = ThemeOverride(
+            user_id=user_id,
+            scope=scope,
+            css_override=css_override,
+            theme_name=theme_name,
+            font=font,
+            preset_id=preset_id,
+        )
+        session.add(override)
+
+    await session.flush()
+    await session.refresh(override)
+    return override
 
 
 # ── User-Facing ─────────────────────────────────────────────────
@@ -57,8 +104,7 @@ async def get_override(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Get the theme override for a specific scope."""
-    if scope not in VALID_SCOPES:
-        raise HTTPException(400, f"Invalid scope. Allowed: {sorted(VALID_SCOPES)}")
+    _validate_scope(scope)
 
     async with get_session() as session:
         result = await session.execute(
@@ -82,37 +128,18 @@ async def upsert_override(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Create or update a theme override for a scope."""
-    if scope not in VALID_SCOPES:
-        raise HTTPException(400, f"Invalid scope. Allowed: {sorted(VALID_SCOPES)}")
+    _validate_scope(scope)
 
     async with get_session() as session:
-        result = await session.execute(
-            select(ThemeOverride).where(
-                ThemeOverride.user_id == user.id,
-                ThemeOverride.scope == scope,
-            )
+        override = await _upsert_theme_override(
+            session,
+            user_id=user.id,
+            scope=scope,
+            css_override=body.css_override,
+            theme_name=body.theme_name,
+            font=body.font,
+            preset_id=body.preset_id,
         )
-        override = result.scalar_one_or_none()
-
-        if override:
-            override.css_override = body.css_override
-            override.theme_name = body.theme_name
-            override.font = body.font
-            override.preset_id = body.preset_id
-        else:
-            override = ThemeOverride(
-                user_id=user.id,
-                scope=scope,
-                css_override=body.css_override,
-                theme_name=body.theme_name,
-                font=body.font,
-                preset_id=body.preset_id,
-            )
-            session.add(override)
-
-        await session.flush()
-        await session.refresh(override)
-
         return ThemeOverrideResponse.model_validate(override)
 
 
@@ -122,8 +149,7 @@ async def delete_override(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Remove a theme override for a scope."""
-    if scope not in VALID_SCOPES:
-        raise HTTPException(400, f"Invalid scope. Allowed: {sorted(VALID_SCOPES)}")
+    _validate_scope(scope)
 
     async with get_session() as session:
         result = await session.execute(
@@ -153,39 +179,22 @@ async def internal_apply_theme(
 
     Authenticated via ZUGABOT_SERVICE_KEY, not user JWT.
     """
-    if not _SERVICE_KEY or x_service_key != _SERVICE_KEY:
+    if not _SERVICE_KEY or not hmac.compare_digest(x_service_key, _SERVICE_KEY):
         raise HTTPException(403, "Invalid service key")
 
-    if body.scope not in VALID_SCOPES:
-        raise HTTPException(400, f"Invalid scope. Allowed: {sorted(VALID_SCOPES)}")
+    _validate_scope(body.scope)
 
     async with get_session() as session:
-        result = await session.execute(
-            select(ThemeOverride).where(
-                ThemeOverride.user_id == body.user_id,
-                ThemeOverride.scope == body.scope,
-            )
+        override = await _upsert_theme_override(
+            session,
+            user_id=body.user_id,
+            scope=body.scope,
+            css_override=body.css_override,
+            theme_name=body.theme_name,
+            font=body.font,
+            preset_id=body.preset_id,
         )
-        override = result.scalar_one_or_none()
-
-        if override:
-            override.css_override = body.css_override
-            override.theme_name = body.theme_name
-            override.font = body.font
-            override.preset_id = body.preset_id
-        else:
-            override = ThemeOverride(
-                user_id=body.user_id,
-                scope=body.scope,
-                css_override=body.css_override,
-                theme_name=body.theme_name,
-                font=body.font,
-                preset_id=body.preset_id,
-            )
-            session.add(override)
-
-        await session.flush()
-        await session.refresh(override)
-
-        logger.info(f"[Theme] Applied '{body.theme_name}' (scope={body.scope}) for user {body.user_id}")
+        logger.info(
+            f"[Theme] Applied '{body.theme_name}' (scope={body.scope}) for user {body.user_id}"
+        )
         return ThemeOverrideResponse.model_validate(override)
