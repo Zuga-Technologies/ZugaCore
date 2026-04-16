@@ -1,7 +1,7 @@
 """AI Gateway routes — token-gated proxy to AI providers.
 
-Self-hosted studios call these endpoints instead of hitting Venice/OpenAI directly.
-Every call: authenticate → estimate cost → try_spend tokens → call provider → return result.
+Browser-side callers (ZugaExtension, ZugaLife onboarding) hit these endpoints.
+Every call: authenticate → estimate cost → can_spend → call provider → try_spend → respond.
 
 Endpoints:
     POST /api/ai/chat   — Text completion (Venice AI)
@@ -12,15 +12,53 @@ Endpoints:
 import base64
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from core.auth.middleware import get_current_user
 from core.auth.models import CurrentUser
-from core.credits.manager import dollars_to_tokens, try_spend
+from core.credits.manager import can_spend, dollars_to_tokens, get_balance, try_spend
+from core.gateway.providers import (
+    TTS_COST_PER_1M_CHARS,
+    VENICE_COST_PER_1M_INPUT,
+    VENICE_COST_PER_1M_OUTPUT,
+    VENICE_DEFAULT_MODEL,
+    call_openai_tts,
+    call_venice,
+    estimate_chat_cost,
+    estimate_chat_tokens_from_prompt,
+    estimate_tts_cost,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ai-gateway"])
+
+
+async def _reject_if_insufficient(
+    user_id: str,
+    user_email: str,
+    est_tokens: float,
+    *,
+    feature: str,
+) -> None:
+    """Pre-flight token check shared by chat and tts.
+
+    Raises HTTPException(402) with a structured detail body if the user
+    can't afford the estimated cost. Callers should still do a real deduct
+    via try_spend after the provider call.
+    """
+    if not await can_spend(user_id, user_email, est_tokens):
+        balance = await get_balance(user_id)
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "insufficient_tokens",
+                "message": f"{feature} needs ~{est_tokens:.0f} tokens. You have {balance['total']:.0f}.",
+                "balance": balance,
+                "estimated_cost": round(est_tokens, 1),
+            },
+        )
 
 
 # ── Request/Response Models ──────────────────────────────────────────
@@ -76,16 +114,9 @@ async def ai_chat(
 ) -> ChatResponse:
     """Token-gated AI text completion via Venice AI.
 
-    Studios call this instead of Venice directly. Tokens are deducted
-    atomically — if the user can't afford it, they get a 402.
+    Returns 402 with a structured body if the user can't afford the
+    pre-flight estimate; actual cost is deducted after the provider call.
     """
-    from core.credits.manager import get_balance
-    from core.gateway.providers import (
-        call_venice,
-        estimate_chat_cost,
-        estimate_chat_tokens_from_prompt,
-    )
-
     # Build messages
     if body.messages:
         messages = body.messages
@@ -94,27 +125,15 @@ async def ai_chat(
     else:
         raise HTTPException(status_code=400, detail="Either prompt or messages required")
 
-    # Estimate cost for pre-flight check
+    # Pre-flight estimate. Output is unknown up front — we assume half of
+    # max_tokens as a conservative lower bound. Real cost is reconciled
+    # after the call via try_spend. Under-estimation means a user who
+    # barely passes pre-flight can overspend by ~2x in the worst case.
     est_input = estimate_chat_tokens_from_prompt(body.prompt, body.messages)
-    est_cost = estimate_chat_cost(est_input, body.max_tokens // 2)  # assume half max output
+    est_cost = estimate_chat_cost(est_input, body.max_tokens // 2)
     est_tokens = dollars_to_tokens(est_cost)
 
-    # Atomic check-and-deduct (pre-flight with estimate)
-    # We'll do the real deduction after the call with actual cost
-    # For now, just verify they have enough for the estimate
-    from core.credits.manager import can_spend
-
-    if not await can_spend(user.id, user.email, est_tokens):
-        balance = await get_balance(user.id)
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": "insufficient_tokens",
-                "message": f"This call needs ~{est_tokens:.0f} tokens. You have {balance['total']:.0f}.",
-                "balance": balance,
-                "estimated_cost": round(est_tokens, 1),
-            },
-        )
+    await _reject_if_insufficient(user.id, user.email, est_tokens, feature="This call")
 
     # Call Venice AI
     try:
@@ -123,11 +142,11 @@ async def ai_chat(
             model=body.model,
             max_tokens=body.max_tokens,
         )
-    except RuntimeError as e:
-        logger.exception("AI provider error for user %s", user.id)
+    except (RuntimeError, httpx.HTTPStatusError, httpx.TransportError):
+        logger.exception("Venice provider error for user %s", user.id)
         raise HTTPException(status_code=503, detail="AI service unavailable")
-    except Exception as e:
-        logger.exception("Unexpected error calling AI for user %s", user.id)
+    except Exception:
+        logger.exception("Unexpected error calling Venice for user %s", user.id)
         raise HTTPException(status_code=502, detail="AI provider error")
 
     # Deduct actual cost
@@ -173,29 +192,14 @@ async def ai_tts(
 ) -> TTSResponse:
     """Token-gated text-to-speech via OpenAI TTS.
 
-    Returns base64-encoded MP3 audio. Studios decode and play/save locally.
+    Returns base64-encoded MP3 audio; caller decodes and plays/saves locally.
+    TTS cost is fully known from len(text), so pre-flight estimate equals
+    actual cost — no under-charge window like /chat has.
     """
-    from core.credits.manager import get_balance
-    from core.gateway.providers import call_openai_tts, estimate_tts_cost
-
-    # Estimate cost
     est_cost = estimate_tts_cost(len(body.text), body.model)
     est_tokens = dollars_to_tokens(est_cost)
 
-    # Pre-flight token check
-    from core.credits.manager import can_spend
-
-    if not await can_spend(user.id, user.email, est_tokens):
-        balance = await get_balance(user.id)
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": "insufficient_tokens",
-                "message": f"TTS needs ~{est_tokens:.0f} tokens. You have {balance['total']:.0f}.",
-                "balance": balance,
-                "estimated_cost": round(est_tokens, 1),
-            },
-        )
+    await _reject_if_insufficient(user.id, user.email, est_tokens, feature="TTS")
 
     # Call OpenAI TTS
     try:
@@ -206,10 +210,10 @@ async def ai_tts(
             speed=body.speed,
             instruction=body.instruction,
         )
-    except RuntimeError as e:
+    except (RuntimeError, httpx.HTTPStatusError, httpx.TransportError):
         logger.exception("TTS provider error for user %s", user.id)
         raise HTTPException(status_code=503, detail="TTS service unavailable")
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected error calling TTS for user %s", user.id)
         raise HTTPException(status_code=502, detail="TTS provider error")
 
@@ -245,14 +249,6 @@ async def available_models() -> dict:
 
     Public endpoint — helps frontend show cost previews before users commit.
     """
-    from core.credits.manager import dollars_to_tokens
-    from core.gateway.providers import (
-        VENICE_COST_PER_1M_INPUT,
-        VENICE_COST_PER_1M_OUTPUT,
-        TTS_COST_PER_1M_CHARS,
-    )
-
-    # Estimated costs for common operations (in ZugaTokens)
     estimates = {
         "therapist_message": round(dollars_to_tokens(0.05), 1),
         "journal_reflection": round(dollars_to_tokens(0.005), 1),
@@ -267,7 +263,7 @@ async def available_models() -> dict:
     return {
         "chat": {
             "provider": "venice",
-            "default_model": "kimi-k2-5",
+            "default_model": VENICE_DEFAULT_MODEL,
             "cost_per_1m_input_usd": VENICE_COST_PER_1M_INPUT,
             "cost_per_1m_output_usd": VENICE_COST_PER_1M_OUTPUT,
         },
