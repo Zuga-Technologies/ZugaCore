@@ -256,9 +256,11 @@ Subsystems vendored:
   ${SUBSYSTEMS[*]}
 
 Transform applied:
-  - removed backend/core/* symlinks
-  - copied ZugaCore subsystems into core/ at repo root
-  - patched backend/main.py sys.path (parent -> parent.parent)
+  - deregistered core/ submodule (if present, e.g. ZugaLife)
+  - removed backend/core/<subsystem> symlinks
+  - copied ZugaCore subsystems into backend/core/<subsystem>/
+  - stripped dev-only .gitignore rules for vendored paths
+  - removed stray repo-root core/ if present (package-shadow guard)
 
 Main branch not touched. Backend-only (Option X); frontend vendoring is
 a separate follow-up pass."

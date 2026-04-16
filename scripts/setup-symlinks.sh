@@ -67,13 +67,20 @@ create_link() {
 # Ensure backend/core directory exists
 mkdir -p "$BACKEND_CORE"
 
-# Create the 3 backend symlinks
+# Create the 7 backend symlinks. Must match SUBSYSTEMS in vendor-core.sh —
+# any subsystem present in one script and absent in the other leaves studios
+# running stale forks in dev mode (the Food Court / Food Truck drift trap).
 echo "Backend symlinks:"
 create_link "$CORE_TARGET/auth"      "$BACKEND_CORE/auth"
+create_link "$CORE_TARGET/credits"   "$BACKEND_CORE/credits"
 create_link "$CORE_TARGET/database"  "$BACKEND_CORE/database"
+create_link "$CORE_TARGET/gateway"   "$BACKEND_CORE/gateway"
 create_link "$CORE_TARGET/lifecycle" "$BACKEND_CORE/lifecycle"
 create_link "$CORE_TARGET/plugins"   "$BACKEND_CORE/plugins"
+create_link "$CORE_TARGET/theme"     "$BACKEND_CORE/theme"
 
 echo ""
-echo "Done! Backend can now import from core.auth, core.database, core.lifecycle, core.plugins"
+echo "Done! Backend can now import from:"
+echo "  core.auth, core.credits, core.database, core.gateway,"
+echo "  core.lifecycle, core.plugins, core.theme"
 echo "(Frontend uses Vite resolve.alias — no symlink needed)"
