@@ -14,6 +14,7 @@ interface User {
 interface LoginResponse {
   token: string
   user: User
+  refresh_token?: string
 }
 
 interface AuthConfig {
@@ -29,6 +30,9 @@ export const useAuthStore = defineStore('auth', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const authConfig = ref<AuthConfig | null>(null)
+  // Held in memory only (never localStorage) so the desktop-protocol redirect
+  // can forward it to ZugaClaw / ZugaGamer. Cleared on logout.
+  const lastRefreshToken = ref<string | null>(null)
 
   const isAuthenticated = computed(() => user.value !== null)
   const isAdmin = computed(() => user.value?.is_admin ?? false)
@@ -53,6 +57,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const res = await api.post<LoginResponse>('/api/auth/login', { email })
       setToken(res.token)
+      lastRefreshToken.value = res.refresh_token ?? null
       user.value = res.user
     } catch (e) {
       if (e instanceof ApiError) {
@@ -73,6 +78,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const res = await api.post<LoginResponse>('/api/auth/password-login', { email, password })
       setToken(res.token)
+      lastRefreshToken.value = res.refresh_token ?? null
       user.value = res.user
     } catch (e) {
       if (e instanceof ApiError) {
@@ -173,6 +179,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const res = await api.post<LoginResponse>('/api/auth/google', { credential })
       setToken(res.token)
+      lastRefreshToken.value = res.refresh_token ?? null
       user.value = res.user
     } catch (e) {
       if (e instanceof ApiError) {
@@ -195,6 +202,7 @@ export const useAuthStore = defineStore('auth', () => {
         provider, code, redirect_uri: redirectUri,
       })
       setToken(res.token)
+      lastRefreshToken.value = res.refresh_token ?? null
       user.value = res.user
     } catch (e) {
       if (e instanceof ApiError) {
@@ -229,6 +237,7 @@ export const useAuthStore = defineStore('auth', () => {
       // Logout endpoint may fail if token already expired — that's fine
     }
     clearToken()
+    lastRefreshToken.value = null
     user.value = null
   }
 
@@ -245,7 +254,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   return {
-    user, loading, error, message, authConfig,
+    user, loading, error, message, authConfig, lastRefreshToken,
     isAuthenticated, isAdmin, authMode, googleClientId, providers,
     fetchAuthConfig, login, passwordLogin, register,
     forgotPassword, resetPassword, verifyEmail,

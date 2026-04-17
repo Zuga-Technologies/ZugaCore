@@ -29,6 +29,7 @@ from supertokens_python.recipe.emailpassword.interfaces import (
 from supertokens_python.recipe.session.asyncio import (
     create_new_session_without_request_response,
     get_session_without_request_response,
+    refresh_session_without_request_response,
     revoke_all_sessions_for_user,
 )
 from supertokens_python.recipe.thirdparty.asyncio import (
@@ -139,6 +140,19 @@ class OAuthLoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     token: str
     user: dict
+    # Desktop-only: refresh token so native clients (ZugaClaw, ZugaGamer)
+    # can refresh without a cookie jar. Web ignores — SuperTokens cookie
+    # handles browser refresh.
+    refresh_token: str | None = None
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class RefreshResponse(BaseModel):
+    token: str
+    refresh_token: str
 
 
 class MessageResponse(BaseModel):
@@ -164,8 +178,14 @@ class AuthConfigResponse(BaseModel):
 
 # ── SuperTokens session helpers ────────────────────────────────────
 
-async def _create_session(user_id: str) -> str:
-    """Create a SuperTokens session and return the access token string."""
+async def _create_session(user_id: str) -> tuple[str, str]:
+    """Create a SuperTokens session and return (access_token, refresh_token).
+
+    Both tokens are surfaced so native clients (ZugaClaw, ZugaGamer) that have
+    no cookie jar can rotate on their own. Web clients use the access token
+    and ignore the refresh token — SuperTokens' HTTP-only cookie handles
+    browser refresh.
+    """
     session = await create_new_session_without_request_response(
         tenant_id="public",
         recipe_user_id=RecipeUserId(user_id),
@@ -174,7 +194,7 @@ async def _create_session(user_id: str) -> str:
         disable_anti_csrf=True,
     )
     tokens = session.get_all_session_tokens_dangerously()
-    return tokens["accessToken"]
+    return tokens["accessToken"], tokens["refreshToken"]
 
 
 def _user_dict(user: CurrentUser) -> dict:
@@ -312,10 +332,10 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
         id=record.id, email=record.email, role=role,
         name=record.name, avatar_url=record.avatar_url,
     )
-    token = await _create_session(st_user_id)
+    token, refresh_token = await _create_session(st_user_id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
 
 
 @router.post("/verify-email", response_model=MessageResponse)
@@ -413,10 +433,10 @@ async def login(body: LoginRequest) -> LoginResponse:
         record = await get_user_by_email(record.email)
 
     user = CurrentUser(id=record.id, email=record.email, role=record.role)
-    token = await _create_session(record.supertokens_user_id or record.id)
+    token, refresh_token = await _create_session(record.supertokens_user_id or record.id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
 
 
 @router.post("/google", response_model=LoginResponse)
@@ -459,10 +479,10 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
         id=record.id, email=record.email, role=record.role,
         name=record.name, avatar_url=record.avatar_url,
     )
-    token = await _create_session(st_user_id)
+    token, refresh_token = await _create_session(st_user_id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
 
 
 @router.post("/oauth", response_model=LoginResponse)
@@ -517,10 +537,44 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
         id=record.id, email=record.email, role=record.role,
         name=record.name, avatar_url=record.avatar_url,
     )
-    token = await _create_session(st_result.user.id)
+    token, refresh_token = await _create_session(st_result.user.id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
+
+
+@router.post("/session/refresh", response_model=RefreshResponse)
+async def refresh_session_endpoint(body: RefreshRequest, request: Request) -> RefreshResponse:
+    """Rotate a SuperTokens session using a desktop-held refresh token.
+
+    Used by native clients (ZugaClaw, ZugaGamer) that have no cookie jar.
+    Web clients don't hit this — their refresh flows through SuperTokens'
+    cookie-based endpoint.
+
+    Refresh tokens ROTATE on every successful call: the returned
+    refresh_token REPLACES the one sent. Clients must persist the new pair.
+    On 401, the client should clear stored tokens and prompt re-login.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"refresh:{client_ip}", max_requests=30, window_seconds=60)
+
+    try:
+        session = await refresh_session_without_request_response(
+            refresh_token=body.refresh_token,
+            disable_anti_csrf=True,
+        )
+    except Exception as exc:
+        # UnauthorisedError, TokenTheftError, or transport error — treat all
+        # as "please log in again." We never surface SuperTokens internals to
+        # the client, and we don't rotate on failure.
+        logger.info("refresh failed for %s: %s", client_ip, exc)
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    tokens = session.get_all_session_tokens_dangerously()
+    return RefreshResponse(
+        token=tokens["accessToken"],
+        refresh_token=tokens["refreshToken"],
+    )
 
 
 @router.post("/logout")
