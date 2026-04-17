@@ -78,7 +78,52 @@ async def _upsert_theme_override(
 
     await session.flush()
     await session.refresh(override)
+
+    await _mirror_theme_to_forge(
+        session=session,
+        user_id=user_id,
+        theme_name=theme_name,
+        css_override=css_override,
+        font=font,
+    )
+
     return override
+
+
+async def _mirror_theme_to_forge(
+    *,
+    session: AsyncSession,
+    user_id: str,
+    theme_name: str,
+    css_override: str,
+    font: str | None,
+) -> None:
+    try:
+        from core.forge.models import ForgeCreation  # local import: ZugaApp-only dependency
+        result = await session.execute(
+            select(ForgeCreation).where(
+                ForgeCreation.creator_id == user_id,
+                ForgeCreation.type == "theme",
+                ForgeCreation.name == theme_name,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.theme_css = css_override
+            existing.theme_font = font
+        else:
+            session.add(ForgeCreation(
+                creator_id=user_id,
+                name=theme_name[:100],
+                type="theme",
+                theme_css=css_override,
+                theme_font=font,
+                status="live",
+                visibility="private",
+            ))
+        await session.flush()
+    except Exception as e:
+        logger.warning(f"[Theme] Forge dual-write failed for theme_name='{theme_name}': {e}")
 
 
 # ── User-Facing ─────────────────────────────────────────────────
