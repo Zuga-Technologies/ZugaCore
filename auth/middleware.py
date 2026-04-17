@@ -46,6 +46,26 @@ async def require_admin(user: CurrentUser = Depends(get_current_user)) -> Curren
     return user
 
 
+# ── Owner detection ───────────────────────────────────────────
+# Moved from core.ai.agent 2026-04-17 to decouple the greeting + chat
+# flows from agent.py (which the remote-chat project will retire).
+# ZUGABOT_OWNER_ID or ZUGABOT_OWNER_EMAIL identify "the person who
+# created Zugabot" — used for warmer tone + elevated tool access.
+import os as _owner_os
+
+_OWNER_ID: str = _owner_os.environ.get("ZUGABOT_OWNER_ID", "")
+_OWNER_EMAIL: str = _owner_os.environ.get("ZUGABOT_OWNER_EMAIL", "").lower()
+
+
+def _is_owner(user_id: str | None, user_email: str | None) -> bool:
+    """Check if this user is Zugabot's creator."""
+    if _OWNER_ID and user_id == _OWNER_ID:
+        return True
+    if _OWNER_EMAIL and user_email and user_email.lower() == _OWNER_EMAIL:
+        return True
+    return False
+
+
 async def _validate_token(token: str) -> CurrentUser | None:
     """Verify a SuperTokens access token JWT and return the user.
 
