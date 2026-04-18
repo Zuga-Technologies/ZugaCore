@@ -126,6 +126,31 @@ async def _mirror_theme_to_forge(
         logger.warning(f"[Theme] Forge dual-write failed for theme_name='{theme_name}': {e}")
 
 
+async def _archive_forge_theme_mirror(
+    *,
+    session: AsyncSession,
+    user_id: str,
+    theme_name: str,
+) -> None:
+    # Inverse of _mirror_theme_to_forge — keeps both stores in sync on delete.
+    # Soft-archive (not hard-delete) to match Forge's delete convention.
+    # See project_theme_dual_write_0417.md.
+    try:
+        from core.forge.models import ForgeCreation
+        result = await session.execute(
+            select(ForgeCreation).where(
+                ForgeCreation.creator_id == user_id,
+                ForgeCreation.type == "theme",
+                ForgeCreation.name == theme_name,
+            )
+        )
+        for creation in result.scalars().all():
+            creation.status = "archived"
+        await session.flush()
+    except Exception as e:
+        logger.warning(f"[Theme] Forge mirror archive failed for theme_name='{theme_name}': {e}")
+
+
 # ── User-Facing ─────────────────────────────────────────────────
 
 
@@ -193,7 +218,11 @@ async def delete_override(
     scope: str,
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Remove a theme override for a scope."""
+    """Remove a theme override for a scope.
+
+    Symmetrically archives the dual-written Forge mirror so the two stores
+    stay in sync. See project_theme_dual_write_0417.md.
+    """
     _validate_scope(scope)
 
     async with get_session() as session:
@@ -207,7 +236,13 @@ async def delete_override(
         if not override:
             raise HTTPException(404, f"No theme override for scope '{scope}'")
 
+        theme_name = override.theme_name
         await session.delete(override)
+        await _archive_forge_theme_mirror(
+            session=session,
+            user_id=user.id,
+            theme_name=theme_name,
+        )
 
     return {"status": "ok", "scope": scope}
 
