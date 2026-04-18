@@ -577,6 +577,31 @@ async def refresh_session_endpoint(body: RefreshRequest, request: Request) -> Re
     )
 
 
+@router.post("/session/for-desktop", response_model=RefreshResponse)
+async def mint_session_for_desktop(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> RefreshResponse:
+    """Mint a fresh SuperTokens session for a user already authed on the web.
+
+    When ZugaClaw / ZugaGamer launch `zugabot.ai/login?redirect=<proto>://...`
+    and the user is already signed in on the web, LoginView calls this with
+    the existing Bearer token. We issue a fresh {access, refresh} pair so the
+    desktop app has what it needs — no re-entering credentials.
+
+    Requires a valid Bearer token; the minted pair is bound to the same user.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"desktop-mint:{client_ip}", max_requests=10, window_seconds=60)
+
+    record = await get_user_by_email(user.email)
+    if record is None or not record.supertokens_user_id:
+        raise HTTPException(status_code=400, detail="User has no SuperTokens ID")
+
+    token, refresh_token = await _create_session(record.supertokens_user_id)
+    return RefreshResponse(token=token, refresh_token=refresh_token)
+
+
 @router.post("/logout")
 async def logout(request: Request, user: CurrentUser = Depends(get_current_user)) -> dict:
     """Revoke the current session."""
