@@ -10,6 +10,19 @@
 
 set -euo pipefail
 
+# Detect a usable Python interpreter once (Mac Mini has python3 only, modern
+# Linux dropped the bare `python` symlink, Windows ships both). Resolving here
+# avoids 7× `command -v` calls inside create_link and surfaces the failure
+# mode (no Python at all) with a clean message instead of mid-loop.
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+else
+    echo "ERROR: neither python3 nor python is on PATH" >&2
+    exit 1
+fi
+
 # Determine the target repo
 if [ $# -ge 1 ]; then
     REPO_DIR="$(cd "$1" && pwd)"
@@ -55,7 +68,7 @@ create_link() {
     # identically on all three OSes — same dep already used by
     # vendor-core.sh for .gitmodules / .gitignore rewrites.
     local rel_target
-    rel_target="$(python -c "import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]).replace(os.sep, '/'))" "$target" "$(dirname "$link")")"
+    rel_target="$("$PYTHON_BIN" -c "import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]).replace(os.sep, '/'))" "$target" "$(dirname "$link")")"
 
     if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
         # Windows: mklink /d accepts relative paths; backslashes required.
