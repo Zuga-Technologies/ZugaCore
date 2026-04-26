@@ -24,7 +24,12 @@
     background: var(--glass-bg);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
-    will-change: transform;
+    /* contain:paint limits invalidation scope — when something inside the
+       card animates, the browser doesn't need to repaint outside the card.
+       Was previously `will-change: transform` which forced every glass-card
+       onto its own GPU layer and combined with backdrop-filter caused
+       per-scroll-frame blur recomputes. */
+    contain: paint;
   }
 
   .glow-accent {
