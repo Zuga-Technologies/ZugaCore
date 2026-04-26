@@ -7,8 +7,6 @@
 
 export type ThemeId =
   | 'none'
-  | 'cyberpunk-city'
-  | 'ai-ambient'
   | 'custom'
 
 export interface ThemeDefinition {
@@ -28,33 +26,13 @@ export const THEMES: ThemeDefinition[] = [
   {
     id: 'none',
     name: 'Default Dark',
-    description: 'Clean dark background — no animation',
+    description: 'Clean dark background',
     preview: 'linear-gradient(135deg, #0a0a0a, #1a1a1a)',
-  },
-  {
-    id: 'cyberpunk-city',
-    name: 'Cyberpunk City',
-    description: 'AI-generated neon cityscape — powered by ZugaVideo',
-    preview: 'linear-gradient(135deg, #1a0a2e, #3b1f7c, #0ea5e9)',
-    video: '/backgrounds/cyberpunk-city-v3.mp4',
-    videoWebm: '/backgrounds/cyberpunk-city-v3.webm',
-    poster: '/backgrounds/cyberpunk-city-poster.jpg',
-    overlay: 0.3,
-    speed: 1.0,
-    fallbackBg: 'linear-gradient(135deg, #0a0a1a, #1a0a2e)',
-  },
-  {
-    id: 'ai-ambient',
-    name: 'AI Ambient',
-    description: 'AI-generated wallpapers that evolve over time (~1 token/image)',
-    preview: 'linear-gradient(135deg, #7c3aed, #3b82f6, #06b6d4)',
-    overlay: 0.25,
-    fallbackBg: 'linear-gradient(135deg, #0f0a1a, #1a1a2e)',
   },
   {
     id: 'custom',
     name: 'Custom',
-    description: 'Your own image or video background',
+    description: 'Upload your own image as a wallpaper',
     preview: 'linear-gradient(135deg, #333, #555, #333)',
   },
 ]
@@ -91,16 +69,16 @@ const CUSTOM_OPACITY_KEY = 'zugalife-bg-custom-opacity'
 
 export function getSavedTheme(): ThemeId | string {
   const saved = localStorage.getItem(STORAGE_KEY)
-  if (!saved) return 'cyberpunk-city'
+  if (!saved) return 'none'
   // User-theme ids: pass through; renderer's fetch will validate
   if (saved.startsWith('th_')) return saved
   // Built-in ids: must be in the registry
   if (THEMES.some(t => t.id === saved)) return saved as ThemeId
-  return 'cyberpunk-city'
+  return 'none'
 }
 export function saveTheme(id: ThemeId | string) { localStorage.setItem(STORAGE_KEY, id) }
 export function getTheme(id: ThemeId): ThemeDefinition {
-  return THEMES.find(t => t.id === id) || THEMES.find(t => t.id === 'cyberpunk-city') || THEMES[0]
+  return THEMES.find(t => t.id === id) || THEMES[0]
 }
 
 export function getCustomImage(): string | null { return localStorage.getItem(CUSTOM_IMG_KEY) }
