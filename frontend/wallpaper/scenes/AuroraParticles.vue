@@ -3,8 +3,10 @@ import { ref, onMounted, onUnmounted } from 'vue'
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 let raf: number | null = null
-let mouseX = 0
-let mouseY = 0
+let mouseX = -9999
+let mouseY = -9999
+const MOUSE_RADIUS = 150
+const MOUSE_FORCE = 40
 
 interface Particle {
   x: number
@@ -61,9 +63,6 @@ function animate() {
   ctx.fillStyle = auroraGrad
   ctx.fillRect(0, 0, w, h)
 
-  const parallaxX = (mouseX / w - 0.5) * 30
-  const parallaxY = (mouseY / h - 0.5) * 30
-
   for (const p of particles) {
     p.x += p.vx
     p.y += p.vy
@@ -72,8 +71,17 @@ function animate() {
     if (p.y < 0) p.y = h
     if (p.y > h) p.y = 0
 
-    const drawX = p.x + parallaxX * (p.r / 2)
-    const drawY = p.y + parallaxY * (p.r / 2)
+    let drawX = p.x
+    let drawY = p.y
+    const dx = p.x - mouseX
+    const dy = p.y - mouseY
+    const dist = Math.sqrt(dx * dx + dy * dy)
+    if (dist < MOUSE_RADIUS && dist > 0.01) {
+      const falloff = 1 - dist / MOUSE_RADIUS
+      const push = falloff * falloff * MOUSE_FORCE
+      drawX = p.x + (dx / dist) * push
+      drawY = p.y + (dy / dist) * push
+    }
 
     const twinkle = (Math.sin(time * 2 + p.x * 0.01) + 1) / 2
     ctx.fillStyle = `hsla(${p.hue}, 80%, 70%, ${p.alpha * (0.5 + twinkle * 0.5)})`
@@ -108,10 +116,16 @@ function onMouseMove(e: MouseEvent) {
   mouseY = e.clientY
 }
 
+function onMouseLeave() {
+  mouseX = -9999
+  mouseY = -9999
+}
+
 onMounted(() => {
   resize()
   window.addEventListener('resize', resize)
   window.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseleave', onMouseLeave)
   raf = requestAnimationFrame(animate)
 })
 
@@ -119,6 +133,7 @@ onUnmounted(() => {
   if (raf) cancelAnimationFrame(raf)
   window.removeEventListener('resize', resize)
   window.removeEventListener('mousemove', onMouseMove)
+  document.removeEventListener('mouseleave', onMouseLeave)
 })
 </script>
 
