@@ -14,8 +14,11 @@ import {
   getAIAmbientInterval,
 } from './registry'
 
-const currentTheme = ref<ThemeId>(getSavedTheme())
-const theme = computed(() => getTheme(currentTheme.value))
+// Widened to string so user-theme ids ('th_*') are accepted alongside the 4 hardcoded ThemeIds
+const currentTheme = ref<string>(getSavedTheme())
+const isUserTheme = computed(() => currentTheme.value.startsWith('th_'))
+// Only resolve through getTheme when it's a known hardcoded id — user-theme ids are not in the registry
+const theme = computed(() => getTheme((isUserTheme.value ? 'none' : currentTheme.value) as ThemeId))
 const hasVideo = computed(() => !!theme.value.video)
 const DEFAULT_SPEED = 0.5
 
@@ -30,12 +33,88 @@ const customVideoRef = ref<HTMLVideoElement | null>(null)
 const customVideoSrc = ref<string | null>(null)
 const isCustomVideo = computed(() => currentTheme.value === 'custom' && getCustomMediaType() === 'video')
 
+// User-theme types (from Plan 4a schemas)
+interface UserTheme {
+  id: string
+  name: string
+  preview_color: string | null
+  active_wallpaper_id: string | null
+  rotation_interval_minutes: number
+}
+interface UserWallpaper {
+  id: string
+  source_studio: 'image' | 'video'
+  source_id: string
+  kind: 'image' | 'video'
+  name: string | null
+}
+
 // AI Ambient wallpaper state
 const aiCurrentImage = ref<string | null>(null)
 const aiPreviousImage = ref<string | null>(null)
 const aiShowCurrent = ref(true)
 let aiPollTimer: ReturnType<typeof setInterval> | null = null
 const isAIAmbient = computed(() => currentTheme.value === 'ai-ambient')
+
+// User-theme wallpaper state (rotate-or-pin)
+const userThemeData = ref<UserTheme | null>(null)
+const userWallpapers = ref<UserWallpaper[]>([])
+const userCurrentIndex = ref(0)
+const userCurrentUrl = ref<string | null>(null)
+const userPreviousUrl = ref<string | null>(null)
+const userShowCurrent = ref(true)
+let userRotateTimer: ReturnType<typeof setInterval> | null = null
+
+function buildWallpaperUrl(w: UserWallpaper): string {
+  if (w.kind === 'video') return `/api/video/wallpaper/${w.source_id}/download`
+  // image kind: rare in Phase 4b — ZugaImage endpoint pattern; Plan 5 may revise
+  return `/api/image/saved/${w.source_id}`
+}
+
+async function startUserTheme(themeId: string) {
+  stopUserTheme()
+  try {
+    userThemeData.value = await api.get<UserTheme>(`/api/themes/${themeId}`)
+    userWallpapers.value = await api.get<UserWallpaper[]>(`/api/wallpapers/mine?theme_id=${themeId}`)
+  } catch {
+    // 401/404 — fall back to the fallbackBg gradient silently
+    return
+  }
+  if (userWallpapers.value.length === 0) return
+
+  const pinId = userThemeData.value?.active_wallpaper_id
+  if (pinId) {
+    const pinned = userWallpapers.value.find(w => w.id === pinId)
+    if (pinned) {
+      userCurrentUrl.value = buildWallpaperUrl(pinned)
+      return  // pinned: no rotation timer needed
+    }
+    // pinned wallpaper deleted/missing — fall through to rotation
+  }
+
+  // Rotation mode
+  userCurrentIndex.value = 0
+  userCurrentUrl.value = buildWallpaperUrl(userWallpapers.value[0])
+  const intervalMs = (userThemeData.value?.rotation_interval_minutes ?? 30) * 60 * 1000
+  if (userWallpapers.value.length > 1) {
+    userRotateTimer = setInterval(() => {
+      userPreviousUrl.value = userCurrentUrl.value
+      userCurrentIndex.value = (userCurrentIndex.value + 1) % userWallpapers.value.length
+      userCurrentUrl.value = buildWallpaperUrl(userWallpapers.value[userCurrentIndex.value])
+      userShowCurrent.value = false
+      requestAnimationFrame(() => { userShowCurrent.value = true })
+    }, intervalMs)
+  }
+}
+
+function stopUserTheme() {
+  if (userRotateTimer) { clearInterval(userRotateTimer); userRotateTimer = null }
+  userThemeData.value = null
+  userWallpapers.value = []
+  userCurrentUrl.value = null
+  userPreviousUrl.value = null
+  userShowCurrent.value = true
+}
 
 // Prefers-reduced-motion
 const prefersReducedMotion = ref(false)
@@ -197,14 +276,20 @@ function stopAIAmbient() {
 }
 
 watch(currentTheme, (id) => {
-  const t = getTheme(id)
-  if (id === 'ai-ambient') {
+  if (id.startsWith('th_')) {
+    stopAIAmbient()
+    startUserTheme(id)
+  } else if (id === 'ai-ambient') {
+    stopUserTheme()
     startAIAmbient()
   } else if (id === 'custom') {
     stopAIAmbient()
+    stopUserTheme()
     loadCustomVideo()
   } else {
     stopAIAmbient()
+    stopUserTheme()
+    const t = getTheme(id as ThemeId)
     if (t.video && !prefersReducedMotion.value) {
       loadVideo(t.video)
     }
@@ -220,7 +305,9 @@ watch(videoA, (el) => {
 })
 
 onMounted(() => {
-  if (currentTheme.value === 'ai-ambient') {
+  if (currentTheme.value.startsWith('th_')) {
+    startUserTheme(currentTheme.value)
+  } else if (currentTheme.value === 'ai-ambient') {
     startAIAmbient()
   } else if (currentTheme.value === 'custom') {
     loadCustomVideo()
@@ -231,11 +318,13 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopAIAmbient()
+  stopUserTheme()
 })
 
-// Listen for theme change events from settings panel
+// Listen for theme change events from settings panel.
+// Cast to string (not ThemeId) — user-theme ids like 'th_*' are valid here.
 function handleThemeChange(e: Event) {
-  currentTheme.value = (e as CustomEvent).detail as ThemeId
+  currentTheme.value = (e as CustomEvent<string>).detail
 }
 onMounted(() => document.addEventListener('zugalife-theme-change', handleThemeChange))
 onUnmounted(() => document.removeEventListener('zugalife-theme-change', handleThemeChange))
@@ -305,6 +394,27 @@ onUnmounted(() => document.removeEventListener('zugalife-theme-change', handleTh
       <div
         class="absolute inset-0"
         :style="{ background: `rgba(0, 0, 0, ${theme.overlay || 0.25})` }"
+      />
+    </template>
+
+    <!-- User Theme wallpaper (rotate-or-pin, crossfade between two image/video layers) -->
+    <template v-if="isUserTheme">
+      <div
+        v-if="userPreviousUrl"
+        class="absolute inset-0 bg-cover bg-center bg-no-repeat transition-opacity duration-[3000ms]"
+        :class="userShowCurrent ? 'opacity-0' : 'opacity-100'"
+        :style="{ backgroundImage: `url(${userPreviousUrl})` }"
+      />
+      <div
+        v-if="userCurrentUrl"
+        class="absolute inset-0 bg-cover bg-center bg-no-repeat transition-opacity duration-[3000ms]"
+        :class="userShowCurrent ? 'opacity-100' : 'opacity-0'"
+        :style="{ backgroundImage: `url(${userCurrentUrl})` }"
+      />
+      <!-- Subtle dark overlay so UI text stays readable over bright wallpapers -->
+      <div
+        class="absolute inset-0"
+        style="background: rgba(0, 0, 0, 0.2)"
       />
     </template>
 
