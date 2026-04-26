@@ -8,18 +8,21 @@
 export type ThemeId =
   | 'none'
   | 'custom'
+  | 'aurora-particles'
 
 export interface ThemeDefinition {
   id: ThemeId
   name: string
   description: string
   preview: string
-  video?: string        // path under /backgrounds/ (MP4)
-  videoWebm?: string    // WebM/VP9 alternative (smaller, better decode perf)
-  poster?: string       // JPEG poster frame for instant display
-  overlay?: number      // dark overlay opacity (0-1) for bright videos
-  fallbackBg?: string   // CSS gradient fallback while video loads
-  speed?: number        // playback rate (default 0.6) — lower = slower
+  /**
+   * Built-in interactive scene id. When set, BackgroundTheme.vue lazy-loads the
+   * matching Vue component from ./scenes/ and renders it as the wallpaper.
+   * Used for Wallpaper-Engine-style live scenes (particles, shaders, audio-reactive).
+   */
+  scene?: string
+  overlay?: number      // dark overlay opacity (0-1) for bright scenes
+  fallbackBg?: string   // CSS gradient fallback while scene mounts
 }
 
 export const THEMES: ThemeDefinition[] = [
@@ -28,6 +31,14 @@ export const THEMES: ThemeDefinition[] = [
     name: 'Default Dark',
     description: 'Clean dark background',
     preview: 'linear-gradient(135deg, #0a0a0a, #1a1a1a)',
+  },
+  {
+    id: 'aurora-particles',
+    name: 'Aurora Particles',
+    description: 'Live animated aurora with mouse-reactive particle field',
+    preview: 'linear-gradient(135deg, #1a0a2e, #2a1a5e, #0ea5e9)',
+    scene: 'aurora-particles',
+    fallbackBg: 'linear-gradient(135deg, #0a0a1a, #1a0a2e)',
   },
   {
     id: 'custom',

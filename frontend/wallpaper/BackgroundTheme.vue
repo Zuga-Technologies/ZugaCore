@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, nextTick, computed, defineAsyncComponent, shallowRef } from 'vue'
 import { api } from '@core/api/client'
 import {
   type ThemeId,
@@ -14,12 +14,34 @@ import {
   getAIAmbientInterval,
 } from './registry'
 
+// Built-in interactive scenes — lazy-loaded so they don't bloat the main bundle.
+const SCENE_COMPONENTS: Record<string, () => Promise<any>> = {
+  'aurora-particles': () => import('./scenes/AuroraParticles.vue'),
+}
+
 // Widened to string so user-theme ids ('th_*') are accepted alongside the 4 hardcoded ThemeIds
 const currentTheme = ref<string>(getSavedTheme())
 const isUserTheme = computed(() => currentTheme.value.startsWith('th_'))
 // Only resolve through getTheme when it's a known hardcoded id — user-theme ids are not in the registry
 const theme = computed(() => getTheme((isUserTheme.value ? 'none' : currentTheme.value) as ThemeId))
-const hasVideo = computed(() => !!theme.value.video)
+const hasVideo = computed(() => !!(theme.value as any).video)
+
+// Interactive scene rendering. theme.scene names a key in SCENE_COMPONENTS;
+// the matching Vue component is lazy-loaded on first activation.
+const sceneComponent = shallowRef<any>(null)
+const isScene = computed(() => !!theme.value.scene && !!SCENE_COMPONENTS[theme.value.scene])
+
+watch(
+  () => theme.value.scene,
+  async (sceneId) => {
+    if (sceneId && SCENE_COMPONENTS[sceneId]) {
+      sceneComponent.value = defineAsyncComponent(SCENE_COMPONENTS[sceneId])
+    } else {
+      sceneComponent.value = null
+    }
+  },
+  { immediate: true }
+)
 const DEFAULT_SPEED = 0.5
 
 // Video refs for crossfade loop
@@ -358,6 +380,18 @@ onUnmounted(() => document.removeEventListener('zugalife-theme-change', handleTh
       :style="{
         background: theme.fallbackBg || '#0a0a0a',
       }"
+    />
+
+    <!-- Interactive scene wallpaper (Wallpaper-Engine style) -->
+    <component
+      v-if="isScene && sceneComponent"
+      :is="sceneComponent"
+      :key="currentTheme"
+    />
+    <div
+      v-if="isScene && theme.overlay && theme.overlay > 0"
+      class="absolute inset-0"
+      :style="{ background: `rgba(0, 0, 0, ${theme.overlay})` }"
     />
 
     <!-- Preset video layers (A and B for crossfade) -->
