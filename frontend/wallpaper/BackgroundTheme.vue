@@ -62,24 +62,35 @@ const userWallpapers = ref<UserWallpaper[]>([])
 const userCurrentIndex = ref(0)
 const userCurrentUrl = ref<string | null>(null)
 const userPreviousUrl = ref<string | null>(null)
+const userCurrentKind = ref<'image' | 'video'>('image')
+const userPreviousKind = ref<'image' | 'video' | null>(null)
 const userShowCurrent = ref(true)
 let userRotateTimer: ReturnType<typeof setInterval> | null = null
+// Incremented by stopUserTheme() to invalidate any in-flight startUserTheme fetches
+let userThemeReqVersion = 0
 
 function buildWallpaperUrl(w: UserWallpaper): string {
-  if (w.kind === 'video') return `/api/video/wallpaper/${w.source_id}/download`
-  // image kind: rare in Phase 4b — ZugaImage endpoint pattern; Plan 5 may revise
-  return `/api/image/saved/${w.source_id}`
+  // Switch on source_studio (which studio owns this asset) — kind drives template branching
+  if (w.source_studio === 'video') return `/api/video/wallpaper/${w.source_id}/download`
+  return `/api/image/saved/${w.source_id}`  // source_studio === 'image'
 }
 
 async function startUserTheme(themeId: string) {
   stopUserTheme()
+  const myVersion = ++userThemeReqVersion
+  let themeData: UserTheme
+  let wallpapers: UserWallpaper[]
   try {
-    userThemeData.value = await api.get<UserTheme>(`/api/themes/${themeId}`)
-    userWallpapers.value = await api.get<UserWallpaper[]>(`/api/wallpapers/mine?theme_id=${themeId}`)
-  } catch {
-    // 401/404 — fall back to the fallbackBg gradient silently
+    themeData = await api.get<UserTheme>(`/api/themes/${themeId}`)
+    if (myVersion !== userThemeReqVersion) return  // superseded by a newer call
+    wallpapers = await api.get<UserWallpaper[]>(`/api/wallpapers/mine?theme_id=${themeId}`)
+    if (myVersion !== userThemeReqVersion) return  // superseded by a newer call
+  } catch (err) {
+    console.warn('[BackgroundTheme] failed to load user theme', themeId, err)
     return
   }
+  userThemeData.value = themeData
+  userWallpapers.value = wallpapers
   if (userWallpapers.value.length === 0) return
 
   const pinId = userThemeData.value?.active_wallpaper_id
@@ -87,6 +98,7 @@ async function startUserTheme(themeId: string) {
     const pinned = userWallpapers.value.find(w => w.id === pinId)
     if (pinned) {
       userCurrentUrl.value = buildWallpaperUrl(pinned)
+      userCurrentKind.value = pinned.kind
       return  // pinned: no rotation timer needed
     }
     // pinned wallpaper deleted/missing — fall through to rotation
@@ -94,13 +106,18 @@ async function startUserTheme(themeId: string) {
 
   // Rotation mode
   userCurrentIndex.value = 0
-  userCurrentUrl.value = buildWallpaperUrl(userWallpapers.value[0])
+  const first = userWallpapers.value[0]
+  userCurrentUrl.value = buildWallpaperUrl(first)
+  userCurrentKind.value = first.kind
   const intervalMs = (userThemeData.value?.rotation_interval_minutes ?? 30) * 60 * 1000
   if (userWallpapers.value.length > 1) {
     userRotateTimer = setInterval(() => {
       userPreviousUrl.value = userCurrentUrl.value
+      userPreviousKind.value = userCurrentKind.value
       userCurrentIndex.value = (userCurrentIndex.value + 1) % userWallpapers.value.length
-      userCurrentUrl.value = buildWallpaperUrl(userWallpapers.value[userCurrentIndex.value])
+      const next = userWallpapers.value[userCurrentIndex.value]
+      userCurrentUrl.value = buildWallpaperUrl(next)
+      userCurrentKind.value = next.kind
       userShowCurrent.value = false
       requestAnimationFrame(() => { userShowCurrent.value = true })
     }, intervalMs)
@@ -108,11 +125,14 @@ async function startUserTheme(themeId: string) {
 }
 
 function stopUserTheme() {
+  userThemeReqVersion++  // invalidate any in-flight startUserTheme fetches
   if (userRotateTimer) { clearInterval(userRotateTimer); userRotateTimer = null }
   userThemeData.value = null
   userWallpapers.value = []
   userCurrentUrl.value = null
   userPreviousUrl.value = null
+  userCurrentKind.value = 'image'
+  userPreviousKind.value = null
   userShowCurrent.value = true
 }
 
@@ -399,14 +419,36 @@ onUnmounted(() => document.removeEventListener('zugalife-theme-change', handleTh
 
     <!-- User Theme wallpaper (rotate-or-pin, crossfade between two image/video layers) -->
     <template v-if="isUserTheme">
+      <!-- Previous (video) -->
+      <video
+        v-if="userPreviousUrl && userPreviousKind === 'video'"
+        :key="`prev-${userPreviousUrl}`"
+        :src="userPreviousUrl"
+        class="absolute inset-0 w-full h-full object-cover transition-opacity duration-[3000ms]"
+        :class="userShowCurrent ? 'opacity-0' : 'opacity-100'"
+        autoplay loop muted playsinline
+      />
+      <!-- Previous (image) -->
       <div
-        v-if="userPreviousUrl"
+        v-else-if="userPreviousUrl"
+        :key="`prev-${userPreviousUrl}`"
         class="absolute inset-0 bg-cover bg-center bg-no-repeat transition-opacity duration-[3000ms]"
         :class="userShowCurrent ? 'opacity-0' : 'opacity-100'"
         :style="{ backgroundImage: `url(${userPreviousUrl})` }"
       />
+      <!-- Current (video) -->
+      <video
+        v-if="userCurrentUrl && userCurrentKind === 'video'"
+        :key="`curr-${userCurrentUrl}`"
+        :src="userCurrentUrl"
+        class="absolute inset-0 w-full h-full object-cover transition-opacity duration-[3000ms]"
+        :class="userShowCurrent ? 'opacity-100' : 'opacity-0'"
+        autoplay loop muted playsinline
+      />
+      <!-- Current (image) -->
       <div
-        v-if="userCurrentUrl"
+        v-else-if="userCurrentUrl"
+        :key="`curr-${userCurrentUrl}`"
         class="absolute inset-0 bg-cover bg-center bg-no-repeat transition-opacity duration-[3000ms]"
         :class="userShowCurrent ? 'opacity-100' : 'opacity-0'"
         :style="{ backgroundImage: `url(${userCurrentUrl})` }"
