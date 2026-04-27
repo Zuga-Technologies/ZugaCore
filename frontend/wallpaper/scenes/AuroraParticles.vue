@@ -12,10 +12,12 @@ let mouseY = -9999
 const MOUSE_RADIUS = 220
 const MOUSE_RADIUS_SQ = MOUSE_RADIUS * MOUSE_RADIUS
 // Subtle attraction toward the cursor — not a strong pull.
-const MOUSE_ATTRACT = 0.012      // per-frame velocity nudge (toward cursor)
+// Slightly stronger than the ZugaTechnologies hero because the aurora overlay
+// dims particle contrast, so the same numerical pull reads as quieter here.
+const MOUSE_ATTRACT = 0.022      // per-frame velocity nudge (toward cursor)
 const VELOCITY_DAMPING = 0.985   // glide-out after mouse leaves
 const MIN_SPEED = 0.04           // floor so particles don't stall
-const MAX_SPEED = 0.10           // cap so they don't slingshot
+const SEED_MAX_SPEED = 0.10      // upper bound on initial seed speed only
 
 interface Particle {
   x: number
@@ -41,7 +43,7 @@ function makeParticle(w: number, h: number): Particle {
   // Seed with a small directional velocity (uniformly-distributed angle,
   // moderate speed) — gives clean drift instead of axis-biased jitter.
   const a = Math.random() * Math.PI * 2
-  const s = MIN_SPEED + Math.random() * (MAX_SPEED - MIN_SPEED)
+  const s = MIN_SPEED + Math.random() * (SEED_MAX_SPEED - MIN_SPEED)
   return {
     x: Math.random() * w,
     y: Math.random() * h,
@@ -140,7 +142,8 @@ function animate() {
       p.vy += (mdy / dist) * falloff * MOUSE_ATTRACT
     }
 
-    // Damp + clamp speed: glide-out after the cursor leaves, no slingshot.
+    // Damp + min-speed floor only — no max clamp. Cursor force accumulates
+    // freely while the mouse is engaged and naturally damps back when it leaves.
     p.vx *= VELOCITY_DAMPING
     p.vy *= VELOCITY_DAMPING
     const sp = Math.sqrt(p.vx * p.vx + p.vy * p.vy)
@@ -148,10 +151,6 @@ function animate() {
       const a = sp > 0 ? Math.atan2(p.vy, p.vx) : Math.random() * Math.PI * 2
       p.vx = Math.cos(a) * MIN_SPEED
       p.vy = Math.sin(a) * MIN_SPEED
-    } else if (sp > MAX_SPEED) {
-      const k = MAX_SPEED / sp
-      p.vx *= k
-      p.vy *= k
     }
 
     p.x += p.vx
