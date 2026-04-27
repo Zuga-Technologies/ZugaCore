@@ -6,6 +6,13 @@ let raf: number | null = null
 
 let mouseX = -9999
 let mouseY = -9999
+// Smoothed cursor position — what the physics actually reads. Lerping toward
+// the raw pointer filters mousemove jitter (raw events fire at variable rates,
+// clustered) so direction shifts feel velvety instead of snappy.
+let smoothMouseX = -9999
+let smoothMouseY = -9999
+const MOUSE_FOLLOW = 0.18        // 0.18 ≈ ~5 frames to settle on a new target
+
 // Tuned to match the ZugaTechnologies ParticleField "feel": large radius,
 // tiny per-frame velocity nudge, integrated by physics rather than slapped
 // onto the draw position. Smoothness comes from damping + integration.
@@ -15,6 +22,7 @@ const MOUSE_RADIUS_SQ = MOUSE_RADIUS * MOUSE_RADIUS
 // Slightly stronger than the ZugaTechnologies hero because the aurora overlay
 // dims particle contrast, so the same numerical pull reads as quieter here.
 const MOUSE_ATTRACT = 0.022      // per-frame velocity nudge (toward cursor)
+const CENTER_TAPER_PX = 24       // force fades to 0 within this radius of cursor
 const VELOCITY_DAMPING = 0.985   // glide-out after mouse leaves
 const MIN_SPEED = 0.04           // floor so particles don't stall
 const SEED_MAX_SPEED = 0.10      // upper bound on initial seed speed only
@@ -127,17 +135,41 @@ function animate() {
   ctx.fillStyle = auroraGrad
   ctx.fillRect(0, 0, w, h)
 
+  // Filter pointer-event jitter before the physics reads it. When the cursor
+  // is offscreen (mouseX < -9000) we snap rather than lerp, otherwise the
+  // smoothed position would slowly drift to -9999 and momentarily attract
+  // particles toward an offscreen point.
+  if (mouseX < -9000) {
+    smoothMouseX = mouseX
+    smoothMouseY = mouseY
+  } else if (smoothMouseX < -9000) {
+    smoothMouseX = mouseX
+    smoothMouseY = mouseY
+  } else {
+    smoothMouseX += (mouseX - smoothMouseX) * MOUSE_FOLLOW
+    smoothMouseY += (mouseY - smoothMouseY) * MOUSE_FOLLOW
+  }
+
   // Slower twinkle frequency — visual noise was contributing to "jittery" feel.
   const timeTwinkle = time * 0.9
   for (const p of particles) {
     // Subtle mouse attraction — applied to velocity, not draw offset. Physics
     // integration is what makes the motion feel silky.
-    const mdx = mouseX - p.x
-    const mdy = mouseY - p.y
+    const mdx = smoothMouseX - p.x
+    const mdy = smoothMouseY - p.y
     const distSq = mdx * mdx + mdy * mdy
     if (distSq < MOUSE_RADIUS_SQ && distSq > 0.0001) {
       const dist = Math.sqrt(distSq)
-      const falloff = (MOUSE_RADIUS - dist) / MOUSE_RADIUS
+      // Smoothstep edge falloff — eases force in/out at the radius boundary
+      // instead of the linear ramp's hard onset.
+      const t = 1 - dist / MOUSE_RADIUS                   // 0 at edge, 1 at center
+      const edge = t * t * (3 - 2 * t)                    // smoothstep
+      // Center taper — fade force to 0 as the particle approaches the cursor
+      // itself. The unit vector flips wildly when crossing through center,
+      // and this makes the magnitude already-zero by then so it never reads.
+      const c = Math.min(1, dist / CENTER_TAPER_PX)
+      const center = c * c * (3 - 2 * c)                  // smoothstep
+      const falloff = edge * center
       p.vx += (mdx / dist) * falloff * MOUSE_ATTRACT
       p.vy += (mdy / dist) * falloff * MOUSE_ATTRACT
     }
