@@ -438,6 +438,12 @@ class ReportSpendRequest(BaseModel):
     metadata: dict | None = None
 
 
+class ServiceGrantRequest(BaseModel):
+    user_id: str = Field(max_length=255)
+    amount: float = Field(gt=0, le=100_000)
+    reason: str = Field(min_length=1, max_length=255)
+
+
 @router.post("/api/credits/can-spend")
 async def check_can_spend(
     body: CanSpendRequest,
@@ -449,6 +455,26 @@ async def check_can_spend(
         balance = await get_balance(body.user_id)
         return {"allowed": False, "balance": balance}
     return {"allowed": True}
+
+
+@router.post("/api/credits/grant")
+async def service_grant(
+    body: ServiceGrantRequest,
+    _key: str = Depends(_verify_service_key),
+) -> dict:
+    """Grant tokens to a user from a service-to-service caller.
+
+    Same X-Service-Key gate as can-spend / report-spend. Used by standalone
+    studios (e.g. ZugaSnipe verified-buy rewards) to credit user wallets
+    without going through the user-admin path. Returns the manager's
+    `{tokens_granted, new_total}` shape.
+    """
+    result = await grant_tokens(body.user_id, body.amount, body.reason)
+    logger.info(
+        "Service grant: user=%s amount=%.1f reason=%s",
+        body.user_id, body.amount, body.reason,
+    )
+    return result
 
 
 @router.post("/api/credits/report-spend")
