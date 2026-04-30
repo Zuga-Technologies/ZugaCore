@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { api, setToken, clearToken, ApiError } from '../api/client'
+import { api, setToken, clearSession, setRefreshToken, getRefreshToken, ApiError } from '../api/client'
 
 interface User {
   id: string
@@ -30,9 +30,15 @@ export const useAuthStore = defineStore('auth', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const authConfig = ref<AuthConfig | null>(null)
-  // Held in memory only (never localStorage) so the desktop-protocol redirect
-  // can forward it to ZugaClaw / ZugaGamer. Cleared on logout.
-  const lastRefreshToken = ref<string | null>(null)
+  // Refresh token is persisted to localStorage so the SPA can silently mint a
+  // fresh access token when the current one expires (~1h SuperTokens default).
+  // Read/write via the api client primitives to keep the storage key in one
+  // place. Used by the desktop-protocol redirect (LoginView, OAuthCallback)
+  // and by tryRefresh() inside the api client on 401.
+  const lastRefreshToken = computed<string | null>({
+    get: () => getRefreshToken(),
+    set: (v) => setRefreshToken(v),
+  })
 
   const isAuthenticated = computed(() => user.value !== null)
   const isAdmin = computed(() => user.value?.is_admin ?? false)
@@ -236,8 +242,7 @@ export const useAuthStore = defineStore('auth', () => {
     } catch {
       // Logout endpoint may fail if token already expired — that's fine
     }
-    clearToken()
-    lastRefreshToken.value = null
+    clearSession()
     user.value = null
   }
 
@@ -246,7 +251,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       user.value = await api.get<User>('/api/auth/me')
     } catch {
-      clearToken()
+      clearSession()
       user.value = null
     } finally {
       loading.value = false
