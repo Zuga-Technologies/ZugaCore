@@ -3,170 +3,412 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>AuroraParticles — preview</title>
+<title>Wallpaper scenes — preview</title>
 <style>
   html,body { margin:0; padding:0; height:100%; background:#000; overflow:hidden; font-family:ui-monospace,monospace; color:#cbd5e1; }
   #stage { position:fixed; inset:0; }
   #hud {
     position:fixed; top:12px; left:12px; z-index:10; padding:10px 12px;
-    background:rgba(10,12,20,.65); border:1px solid rgba(148,163,184,.25);
+    background:rgba(10,12,20,.7); border:1px solid rgba(148,163,184,.25);
     border-radius:8px; font-size:12px; line-height:1.5; backdrop-filter: blur(6px);
+    max-width: 360px;
   }
   #hud b { color:#e2e8f0; }
   #hud kbd { background:rgba(148,163,184,.18); padding:1px 5px; border-radius:3px; font-size:11px; }
+  #picker { display:flex; gap:6px; margin-top:6px; }
+  #picker button {
+    background:rgba(30,41,59,.8); color:#cbd5e1; border:1px solid rgba(148,163,184,.3);
+    padding:4px 10px; border-radius:6px; font:inherit; font-size:11px; cursor:pointer;
+  }
+  #picker button.active { background:#0ea5e9; color:#fff; border-color:#0ea5e9; }
+  #picker button:hover:not(.active) { background:rgba(51,65,85,.9); }
+  #vals { margin-top:6px; color:#94a3b8; font-size:11px; }
+  #help { margin-top:6px; color:#64748b; font-size:11px; }
 </style>
 </head>
 <body>
   <canvas id="stage"></canvas>
   <div id="hud">
-    <b>AuroraParticles preview</b><br>
-    move cursor over field — should orbit, not clump<br>
-    park cursor off-screen — should drift on flow<br>
-    <kbd>1/2</kbd> flow amp · <kbd>3/4</kbd> repel px · <kbd>5/6</kbd> damping
-    <div id="vals" style="margin-top:6px;color:#94a3b8"></div>
+    <b>Wallpaper scenes — preview</b>
+    <div id="picker">
+      <button data-scene="aurora">Aurora</button>
+      <button data-scene="fireflies">Fireflies</button>
+      <button data-scene="lattice">Lattice</button>
+    </div>
+    <div id="vals"></div>
+    <div id="help"></div>
   </div>
 <script>
-// === Constants — mirror AuroraParticles.vue ===
-let MOUSE_RADIUS = 220;
-let MOUSE_RADIUS_SQ = MOUSE_RADIUS*MOUSE_RADIUS;
-let MOUSE_ATTRACT = 0.022;
-let MOUSE_REPEL_PX = 50;
-let MOUSE_RADIAL = 0.3;
-let MOUSE_TANGENTIAL = 0.7;
-let VELOCITY_DAMPING = 0.985;
-let MIN_SPEED = 0.04;
-let MAX_SPEED = 1.4;
-let SEED_MAX_SPEED = 0.10;
-let FLOW_AMP = 0.006;
-const FLOW_SCALE_XY = 0.0018;
-const FLOW_SCALE_T = 0.06;
-const MOUSE_FOLLOW = 0.18;
-
 const c = document.getElementById('stage');
 const ctx = c.getContext('2d');
 let viewW=0, viewH=0, dpr=1;
 let mouseX=-9999, mouseY=-9999, smoothMouseX=-9999, smoothMouseY=-9999;
-const particles=[];
+const MOUSE_FOLLOW = 0.18;
 
-function targetCount(w,h){ return Math.max(24, Math.min(80, Math.round((w*h)/25000))); }
-function makeParticle(w,h){
-  const a = Math.random()*Math.PI*2;
-  const s = MIN_SPEED + Math.random()*(SEED_MAX_SPEED-MIN_SPEED);
-  return { x:Math.random()*w, y:Math.random()*h, vx:Math.cos(a)*s, vy:Math.sin(a)*s,
-           r:Math.random()*2+0.5, hue:180+Math.random()*120, alpha:Math.random()*0.5+0.2 };
+// ============================================================================
+// Scene: Aurora Particles
+// ============================================================================
+const aurora = (() => {
+  let MOUSE_RADIUS = 220, MOUSE_RADIUS_SQ = MOUSE_RADIUS*MOUSE_RADIUS;
+  let MOUSE_ATTRACT = 0.022;
+  let MOUSE_REPEL_PX = 50;
+  let MOUSE_RADIAL = 0.3, MOUSE_TANGENTIAL = 0.7;
+  let VELOCITY_DAMPING = 0.985;
+  const MIN_SPEED = 0.04, MAX_SPEED = 1.4, SEED_MAX_SPEED = 0.10;
+  let FLOW_AMP = 0.006;
+  const FLOW_SCALE_XY = 0.0018, FLOW_SCALE_T = 0.06;
+
+  const particles = [];
+  let bgGrad=null, bgFrame=0; const BG_REBUILD=16;
+  let auroraGrad=null, auroraFrame=0; const AUR_REBUILD=8;
+
+  function targetCount(w,h){ return Math.max(24, Math.min(80, Math.round((w*h)/25000))); }
+  function makeP(w,h){
+    const a=Math.random()*Math.PI*2, s=MIN_SPEED+Math.random()*(SEED_MAX_SPEED-MIN_SPEED);
+    return { x:Math.random()*w, y:Math.random()*h, vx:Math.cos(a)*s, vy:Math.sin(a)*s,
+             r:Math.random()*2+0.5, hue:180+Math.random()*120, alpha:Math.random()*0.5+0.2 };
+  }
+  function reconcile(w,h){
+    const want=targetCount(w,h);
+    for(const p of particles){ if(p.x<0||p.x>w) p.x=Math.random()*w; if(p.y<0||p.y>h) p.y=Math.random()*h; }
+    while(particles.length<want) particles.push(makeP(w,h));
+    if(particles.length>want) particles.length=want;
+  }
+  function bgG(w,h,t){
+    const t1=(Math.sin(t*0.1)+1)/2, t2=(Math.cos(t*0.13)+1)/2;
+    const g=ctx.createLinearGradient(0,0,w,h);
+    g.addColorStop(0,`hsl(${260+t1*30},60%,${8+t1*4}%)`);
+    g.addColorStop(0.5,`hsl(${220+t2*40},70%,${10+t2*6}%)`);
+    g.addColorStop(1,`hsl(${190+t1*30},80%,${6+t2*4}%)`);
+    return g;
+  }
+  function aurG(w,h,t){
+    const ay=h*0.4+Math.sin(t*0.3)*30;
+    const g=ctx.createLinearGradient(0,ay-200,0,ay+200);
+    g.addColorStop(0,'rgba(56,189,248,0)');
+    g.addColorStop(0.5,`rgba(${100+Math.sin(t)*50},${200+Math.cos(t*0.7)*30},255,0.18)`);
+    g.addColorStop(1,'rgba(167,139,250,0)');
+    return g;
+  }
+
+  return {
+    name: 'aurora',
+    onResize: (w,h) => { reconcile(w,h); bgGrad=null; auroraGrad=null; },
+    onActivate: (w,h) => { particles.length=0; reconcile(w,h); bgGrad=null; auroraGrad=null; },
+    keys: '[1/2] flow amp · [3/4] repel px · [5/6] damping · [7/8] tangential mix',
+    vals: () => `FLOW=${FLOW_AMP.toFixed(4)}  REPEL=${MOUSE_REPEL_PX}  DAMP=${VELOCITY_DAMPING.toFixed(3)}  TANG=${MOUSE_TANGENTIAL.toFixed(2)}`,
+    onKey: (k) => {
+      if(k==='1') FLOW_AMP=Math.max(0,FLOW_AMP-0.002);
+      if(k==='2') FLOW_AMP=Math.min(0.05,FLOW_AMP+0.002);
+      if(k==='3') MOUSE_REPEL_PX=Math.max(0,MOUSE_REPEL_PX-10);
+      if(k==='4') MOUSE_REPEL_PX=Math.min(MOUSE_RADIUS,MOUSE_REPEL_PX+10);
+      if(k==='5') VELOCITY_DAMPING=Math.max(0.95,VELOCITY_DAMPING-0.005);
+      if(k==='6') VELOCITY_DAMPING=Math.min(0.999,VELOCITY_DAMPING+0.005);
+      if(k==='7') { MOUSE_TANGENTIAL=Math.max(0,MOUSE_TANGENTIAL-0.1); MOUSE_RADIAL=1-MOUSE_TANGENTIAL; }
+      if(k==='8') { MOUSE_TANGENTIAL=Math.min(1,MOUSE_TANGENTIAL+0.1); MOUSE_RADIAL=1-MOUSE_TANGENTIAL; }
+    },
+    frame: (w,h,time) => {
+      if(!bgGrad||bgFrame<=0){ bgGrad=bgG(w,h,time); bgFrame=BG_REBUILD; } bgFrame--;
+      ctx.fillStyle=bgGrad; ctx.fillRect(0,0,w,h);
+      if(!auroraGrad||auroraFrame<=0){ auroraGrad=aurG(w,h,time); auroraFrame=AUR_REBUILD; } auroraFrame--;
+      ctx.fillStyle=auroraGrad; ctx.fillRect(0,0,w,h);
+
+      const tt = time*0.9;
+      for(const p of particles){
+        const ang=(Math.sin(p.x*FLOW_SCALE_XY+time*FLOW_SCALE_T)+Math.cos(p.y*FLOW_SCALE_XY+time*FLOW_SCALE_T*0.83))*Math.PI;
+        p.vx+=Math.cos(ang)*FLOW_AMP; p.vy+=Math.sin(ang)*FLOW_AMP;
+
+        const mdx=smoothMouseX-p.x, mdy=smoothMouseY-p.y, distSq=mdx*mdx+mdy*mdy;
+        if(distSq<MOUSE_RADIUS_SQ && distSq>0.0001){
+          const dist=Math.sqrt(distSq);
+          const t=1-dist/MOUSE_RADIUS, edge=t*t*(3-2*t);
+          const rx=mdx/dist, ry=mdy/dist, tx=-ry, ty=rx;
+          const sign=dist<MOUSE_REPEL_PX?-1:1;
+          p.vx+=(sign*rx*MOUSE_RADIAL+tx*MOUSE_TANGENTIAL)*edge*MOUSE_ATTRACT;
+          p.vy+=(sign*ry*MOUSE_RADIAL+ty*MOUSE_TANGENTIAL)*edge*MOUSE_ATTRACT;
+        }
+        p.vx*=VELOCITY_DAMPING; p.vy*=VELOCITY_DAMPING;
+        const sp=Math.sqrt(p.vx*p.vx+p.vy*p.vy);
+        if(sp>MAX_SPEED){ const k=MAX_SPEED/sp; p.vx*=k; p.vy*=k; }
+        else if(sp<MIN_SPEED && sp>0){ const a=Math.atan2(p.vy,p.vx); p.vx=Math.cos(a)*MIN_SPEED; p.vy=Math.sin(a)*MIN_SPEED; }
+
+        p.x+=p.vx; p.y+=p.vy;
+        if(p.x<-5) p.x=w+5; if(p.x>w+5) p.x=-5;
+        if(p.y<-5) p.y=h+5; if(p.y>h+5) p.y=-5;
+
+        const tw=(Math.sin(tt+p.hue*0.05)+1)/2, a=p.alpha*(0.5+tw*0.5);
+        ctx.fillStyle=`hsla(${p.hue},80%,70%,${a})`;
+        ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle=`hsla(${p.hue},80%,70%,${p.alpha*0.15})`;
+        ctx.beginPath(); ctx.arc(p.x,p.y,p.r*4,0,Math.PI*2); ctx.fill();
+      }
+    }
+  };
+})();
+
+// ============================================================================
+// Scene: Fireflies
+// ============================================================================
+const fireflies = (() => {
+  const MOUSE_RADIUS = 260, MOUSE_RADIUS_SQ = MOUSE_RADIUS*MOUSE_RADIUS;
+  let MOUSE_ATTRACT = 0.012;
+  let VELOCITY_DAMPING = 0.978;
+  const MIN_SPEED = 0.025, MAX_SPEED = 0.9, SEED_MAX_SPEED = 0.06;
+  let FLOW_AMP = 0.004;
+  const FLOW_SCALE_XY = 0.0022, FLOW_SCALE_T = 0.04;
+
+  const flies = [];
+  let bgGrad=null, bgFrame=0; const BG_REBUILD=32;
+
+  function targetCount(w,h){ return Math.max(14, Math.min(45, Math.round((w*h)/38000))); }
+  function makeF(w,h,time){
+    const a=Math.random()*Math.PI*2, s=MIN_SPEED+Math.random()*(SEED_MAX_SPEED-MIN_SPEED);
+    return { x:Math.random()*w, y:Math.random()*h, vx:Math.cos(a)*s, vy:Math.sin(a)*s,
+             r:1.4+Math.random()*1.6, hue:40+Math.random()*50,
+             pulseRate:0.4+Math.random()*0.6, pulsePhase:Math.random()*Math.PI*2,
+             blinkAt:time+4+Math.random()*12 };
+  }
+  function reconcile(w,h,time){
+    const want=targetCount(w,h);
+    for(const f of flies){ if(f.x<0||f.x>w) f.x=Math.random()*w; if(f.y<0||f.y>h) f.y=Math.random()*h; }
+    while(flies.length<want) flies.push(makeF(w,h,time));
+    if(flies.length>want) flies.length=want;
+  }
+  function bgG(w,h,t){
+    const t1=(Math.sin(t*0.05)+1)/2;
+    const g=ctx.createLinearGradient(0,0,0,h);
+    g.addColorStop(0,`hsl(${200+t1*10},55%,${4+t1*2}%)`);
+    g.addColorStop(0.6,`hsl(${175+t1*8},45%,${5+t1*2}%)`);
+    g.addColorStop(1,'hsl(220,50%,2%)');
+    return g;
+  }
+
+  return {
+    name: 'fireflies',
+    onResize: (w,h) => { reconcile(w,h,performance.now()/1000); bgGrad=null; },
+    onActivate: (w,h) => { flies.length=0; reconcile(w,h,performance.now()/1000); bgGrad=null; },
+    keys: '[1/2] flow amp · [3/4] attract strength · [5/6] damping',
+    vals: () => `FLOW=${FLOW_AMP.toFixed(4)}  ATTRACT=${MOUSE_ATTRACT.toFixed(3)}  DAMP=${VELOCITY_DAMPING.toFixed(3)}`,
+    onKey: (k) => {
+      if(k==='1') FLOW_AMP=Math.max(0,FLOW_AMP-0.001);
+      if(k==='2') FLOW_AMP=Math.min(0.03,FLOW_AMP+0.001);
+      if(k==='3') MOUSE_ATTRACT=Math.max(0,MOUSE_ATTRACT-0.003);
+      if(k==='4') MOUSE_ATTRACT=Math.min(0.05,MOUSE_ATTRACT+0.003);
+      if(k==='5') VELOCITY_DAMPING=Math.max(0.95,VELOCITY_DAMPING-0.005);
+      if(k==='6') VELOCITY_DAMPING=Math.min(0.999,VELOCITY_DAMPING+0.005);
+    },
+    frame: (w,h,time) => {
+      if(!bgGrad||bgFrame<=0){ bgGrad=bgG(w,h,time); bgFrame=BG_REBUILD; } bgFrame--;
+      ctx.fillStyle=bgGrad; ctx.fillRect(0,0,w,h);
+
+      for(const f of flies){
+        const n1=Math.sin(f.x*FLOW_SCALE_XY+time*FLOW_SCALE_T);
+        const n2=Math.cos(f.y*FLOW_SCALE_XY+time*FLOW_SCALE_T*0.83);
+        f.vx+=n2*FLOW_AMP; f.vy+=-n1*FLOW_AMP;
+
+        const mdx=smoothMouseX-f.x, mdy=smoothMouseY-f.y, distSq=mdx*mdx+mdy*mdy;
+        if(distSq<MOUSE_RADIUS_SQ && distSq>0.0001){
+          const dist=Math.sqrt(distSq);
+          const t=1-dist/MOUSE_RADIUS, edge=t*t*(3-2*t);
+          f.vx+=(mdx/dist)*edge*MOUSE_ATTRACT;
+          f.vy+=(mdy/dist)*edge*MOUSE_ATTRACT;
+        }
+        f.vx*=VELOCITY_DAMPING; f.vy*=VELOCITY_DAMPING;
+        const sp=Math.sqrt(f.vx*f.vx+f.vy*f.vy);
+        if(sp>MAX_SPEED){ const k=MAX_SPEED/sp; f.vx*=k; f.vy*=k; }
+        else if(sp<MIN_SPEED && sp>0){ const a=Math.atan2(f.vy,f.vx); f.vx=Math.cos(a)*MIN_SPEED; f.vy=Math.sin(a)*MIN_SPEED; }
+
+        f.x+=f.vx; f.y+=f.vy;
+        if(f.x<-10) f.x=w+10; if(f.x>w+10) f.x=-10;
+        if(f.y<-10) f.y=h+10; if(f.y>h+10) f.y=-10;
+
+        let pulse=0.25+0.75*(0.5+0.5*Math.sin(time*f.pulseRate*Math.PI*2+f.pulsePhase));
+        if(time>f.blinkAt){
+          const into=time-f.blinkAt;
+          if(into<0.4){ pulse=Math.min(1,pulse+Math.sin((into/0.4)*Math.PI)*0.5); }
+          else { f.blinkAt=time+6+Math.random()*14; }
+        }
+
+        ctx.fillStyle=`hsla(${f.hue},95%,70%,${0.10*pulse})`;
+        ctx.beginPath(); ctx.arc(f.x,f.y,f.r*7,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle=`hsla(${f.hue},95%,75%,${0.22*pulse})`;
+        ctx.beginPath(); ctx.arc(f.x,f.y,f.r*3,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle=`hsla(${f.hue},100%,88%,${0.95*pulse})`;
+        ctx.beginPath(); ctx.arc(f.x,f.y,f.r,0,Math.PI*2); ctx.fill();
+      }
+    }
+  };
+})();
+
+// ============================================================================
+// Scene: Lattice
+// ============================================================================
+const lattice = (() => {
+  const MOUSE_RADIUS = 200, MOUSE_RADIUS_SQ = MOUSE_RADIUS*MOUSE_RADIUS;
+  let MOUSE_PUSH = 38;
+  let SPRING_K = 0.06;
+  let SPRING_DAMP = 0.82;
+  const WOBBLE_AMP = 4, WOBBLE_RATE = 0.6;
+  const CELL_TARGET = 84, CELL_MIN = 70, CELL_MAX = 110;
+
+  let cols=0, rows=0, cell=CELL_TARGET;
+  const nodes=[];
+  let bgGrad=null, bgFrame=0; const BG_REBUILD=32;
+
+  function rebuild(w,h){
+    const idealCols=Math.round(w/CELL_TARGET);
+    cell=Math.max(CELL_MIN,Math.min(CELL_MAX,w/Math.max(1,idealCols)));
+    cols=Math.ceil(w/cell)+1; rows=Math.ceil(h/cell)+1;
+    nodes.length=0;
+    for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+      nodes.push({ bx:c*cell, by:r*cell, x:c*cell, y:r*cell, dx:0,dy:0,vdx:0,vdy:0,
+                   phase:Math.random()*Math.PI*2, rateMul:0.7+Math.random()*0.6 });
+    }
+  }
+  function bgG(w,h,t){
+    const t1=(Math.sin(t*0.07)+1)/2;
+    const g=ctx.createRadialGradient(w/2,h/2,0,w/2,h/2,Math.hypot(w,h)/2);
+    g.addColorStop(0,`hsl(${200+t1*15},65%,${7+t1*3}%)`);
+    g.addColorStop(0.6,'hsl(220,55%,5%)');
+    g.addColorStop(1,'hsl(225,50%,2%)');
+    return g;
+  }
+
+  return {
+    name: 'lattice',
+    onResize: (w,h) => { rebuild(w,h); bgGrad=null; },
+    onActivate: (w,h) => { rebuild(w,h); bgGrad=null; },
+    keys: '[1/2] push strength · [3/4] spring stiffness · [5/6] damping',
+    vals: () => `PUSH=${MOUSE_PUSH}  SPRING_K=${SPRING_K.toFixed(3)}  DAMP=${SPRING_DAMP.toFixed(2)}`,
+    onKey: (k) => {
+      if(k==='1') MOUSE_PUSH=Math.max(0,MOUSE_PUSH-5);
+      if(k==='2') MOUSE_PUSH=Math.min(120,MOUSE_PUSH+5);
+      if(k==='3') SPRING_K=Math.max(0.01,SPRING_K-0.01);
+      if(k==='4') SPRING_K=Math.min(0.2,SPRING_K+0.01);
+      if(k==='5') SPRING_DAMP=Math.max(0.6,SPRING_DAMP-0.02);
+      if(k==='6') SPRING_DAMP=Math.min(0.95,SPRING_DAMP+0.02);
+    },
+    frame: (w,h,time) => {
+      if(!bgGrad||bgFrame<=0){ bgGrad=bgG(w,h,time); bgFrame=BG_REBUILD; } bgFrame--;
+      ctx.fillStyle=bgGrad; ctx.fillRect(0,0,w,h);
+
+      for(const n of nodes){
+        const wobX=Math.cos(time*n.rateMul*WOBBLE_RATE*Math.PI*2+n.phase)*WOBBLE_AMP;
+        const wobY=Math.sin(time*n.rateMul*WOBBLE_RATE*Math.PI*2+n.phase*1.3)*WOBBLE_AMP;
+        n.vdx+=-SPRING_K*n.dx; n.vdy+=-SPRING_K*n.dy;
+        const mdx=smoothMouseX-n.bx, mdy=smoothMouseY-n.by, distSq=mdx*mdx+mdy*mdy;
+        if(distSq<MOUSE_RADIUS_SQ && distSq>0.0001){
+          const dist=Math.sqrt(distSq);
+          const t=1-dist/MOUSE_RADIUS, edge=t*t*(3-2*t);
+          n.vdx+=-(mdx/dist)*edge*MOUSE_PUSH*0.04;
+          n.vdy+=-(mdy/dist)*edge*MOUSE_PUSH*0.04;
+        }
+        n.vdx*=SPRING_DAMP; n.vdy*=SPRING_DAMP;
+        n.dx+=n.vdx; n.dy+=n.vdy;
+        n.x=n.bx+n.dx+wobX; n.y=n.by+n.dy+wobY;
+      }
+
+      ctx.lineWidth=1;
+      for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+        const i=r*cols+c, n=nodes[i];
+        if(c+1<cols){
+          const m=nodes[i+1], len=Math.hypot(m.x-n.x,m.y-n.y);
+          const stretch=Math.min(1.6,len/cell);
+          const alpha=Math.max(0.04,Math.min(0.55,0.12*stretch*stretch));
+          const hue=190+Math.min(40,(stretch-1)*60);
+          ctx.strokeStyle=`hsla(${hue},80%,65%,${alpha})`;
+          ctx.beginPath(); ctx.moveTo(n.x,n.y); ctx.lineTo(m.x,m.y); ctx.stroke();
+        }
+        if(r+1<rows){
+          const m=nodes[i+cols], len=Math.hypot(m.x-n.x,m.y-n.y);
+          const stretch=Math.min(1.6,len/cell);
+          const alpha=Math.max(0.04,Math.min(0.55,0.12*stretch*stretch));
+          const hue=190+Math.min(40,(stretch-1)*60);
+          ctx.strokeStyle=`hsla(${hue},80%,65%,${alpha})`;
+          ctx.beginPath(); ctx.moveTo(n.x,n.y); ctx.lineTo(m.x,m.y); ctx.stroke();
+        }
+      }
+      for(const n of nodes){
+        const disp=Math.min(1,Math.hypot(n.dx,n.dy)/30);
+        const alpha=0.35+0.55*disp, r=1.2+disp*1.8;
+        ctx.fillStyle=`hsla(${195+disp*25},90%,${70+disp*15}%,${alpha})`;
+        ctx.beginPath(); ctx.arc(n.x,n.y,r,0,Math.PI*2); ctx.fill();
+      }
+    }
+  };
+})();
+
+// ============================================================================
+// Driver
+// ============================================================================
+const SCENES = { aurora, fireflies, lattice };
+let active = aurora;
+
+function setScene(name) {
+  active = SCENES[name];
+  active.onActivate(viewW, viewH);
+  document.querySelectorAll('#picker button').forEach(b => {
+    b.classList.toggle('active', b.dataset.scene === name);
+  });
+  document.getElementById('help').textContent = active.keys;
+  showVals();
+  // Persist for reload
+  try { localStorage.setItem('zugaWallpaperPreviewScene', name); } catch {}
 }
-function reconcile(w,h){
-  const want = targetCount(w,h);
-  for (const p of particles){ if(p.x<0||p.x>w) p.x=Math.random()*w; if(p.y<0||p.y>h) p.y=Math.random()*h; }
-  while(particles.length<want) particles.push(makeParticle(w,h));
-  if(particles.length>want) particles.length=want;
-}
-function resize(){
-  dpr = Math.min(window.devicePixelRatio||1, 2);
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
   viewW = window.innerWidth; viewH = window.innerHeight;
   c.width = Math.max(1, Math.floor(viewW*dpr));
   c.height = Math.max(1, Math.floor(viewH*dpr));
   c.style.width = viewW+'px'; c.style.height = viewH+'px';
   ctx.setTransform(dpr,0,0,dpr,0,0);
-  reconcile(viewW, viewH);
-  bgGrad=null; auroraGrad=null;
+  active.onResize(viewW, viewH);
 }
 
-let bgGrad=null, bgFrame=0; const BG_REBUILD_EVERY=16;
-let auroraGrad=null, auroraFrame=0; const AURORA_REBUILD_EVERY=8;
-function buildBgGrad(w,h,t){
-  const t1=(Math.sin(t*0.1)+1)/2, t2=(Math.cos(t*0.13)+1)/2;
-  const g=ctx.createLinearGradient(0,0,w,h);
-  g.addColorStop(0, `hsl(${260+t1*30}, 60%, ${8+t1*4}%)`);
-  g.addColorStop(0.5, `hsl(${220+t2*40}, 70%, ${10+t2*6}%)`);
-  g.addColorStop(1, `hsl(${190+t1*30}, 80%, ${6+t2*4}%)`);
-  return g;
-}
-function buildAuroraGrad(w,h,t){
-  const ay = h*0.4 + Math.sin(t*0.3)*30;
-  const g=ctx.createLinearGradient(0, ay-200, 0, ay+200);
-  g.addColorStop(0, 'rgba(56, 189, 248, 0)');
-  g.addColorStop(0.5, `rgba(${100+Math.sin(t)*50}, ${200+Math.cos(t*0.7)*30}, 255, 0.18)`);
-  g.addColorStop(1, 'rgba(167, 139, 250, 0)');
-  return g;
+function showVals() {
+  document.getElementById('vals').textContent = active.vals();
 }
 
-function frame(){
-  const w=viewW, h=viewH, time=performance.now()/1000;
+function frame() {
+  const time = performance.now()/1000;
 
-  if(!bgGrad || bgFrame<=0){ bgGrad=buildBgGrad(w,h,time); bgFrame=BG_REBUILD_EVERY; }
-  bgFrame--; ctx.fillStyle=bgGrad; ctx.fillRect(0,0,w,h);
-  if(!auroraGrad || auroraFrame<=0){ auroraGrad=buildAuroraGrad(w,h,time); auroraFrame=AURORA_REBUILD_EVERY; }
-  auroraFrame--; ctx.fillStyle=auroraGrad; ctx.fillRect(0,0,w,h);
-
-  if (mouseX<-9000){ smoothMouseX=mouseX; smoothMouseY=mouseY; }
-  else if (smoothMouseX<-9000){ smoothMouseX=mouseX; smoothMouseY=mouseY; }
-  else { smoothMouseX += (mouseX-smoothMouseX)*MOUSE_FOLLOW; smoothMouseY += (mouseY-smoothMouseY)*MOUSE_FOLLOW; }
-
-  const timeTwinkle = time*0.9;
-  for (const p of particles){
-    // flow-field drift
-    const ang = (Math.sin(p.x*FLOW_SCALE_XY + time*FLOW_SCALE_T)
-              + Math.cos(p.y*FLOW_SCALE_XY + time*FLOW_SCALE_T*0.83)) * Math.PI;
-    p.vx += Math.cos(ang)*FLOW_AMP;
-    p.vy += Math.sin(ang)*FLOW_AMP;
-
-    // mouse — orbit (sign flip inside repel zone)
-    const mdx = smoothMouseX-p.x, mdy = smoothMouseY-p.y;
-    const distSq = mdx*mdx + mdy*mdy;
-    if (distSq < MOUSE_RADIUS_SQ && distSq > 0.0001){
-      const dist = Math.sqrt(distSq);
-      const t = 1 - dist/MOUSE_RADIUS;
-      const edge = t*t*(3-2*t);
-      const rx = mdx/dist, ry = mdy/dist;
-      const tx = -ry, ty = rx;
-      const sign = dist < MOUSE_REPEL_PX ? -1 : 1;
-      p.vx += (sign*rx*MOUSE_RADIAL + tx*MOUSE_TANGENTIAL)*edge*MOUSE_ATTRACT;
-      p.vy += (sign*ry*MOUSE_RADIAL + ty*MOUSE_TANGENTIAL)*edge*MOUSE_ATTRACT;
-    }
-
-    p.vx *= VELOCITY_DAMPING; p.vy *= VELOCITY_DAMPING;
-    const sp = Math.sqrt(p.vx*p.vx + p.vy*p.vy);
-    if (sp > MAX_SPEED){ const k=MAX_SPEED/sp; p.vx*=k; p.vy*=k; }
-    else if (sp < MIN_SPEED && sp > 0){
-      const a = Math.atan2(p.vy, p.vx);
-      p.vx = Math.cos(a)*MIN_SPEED; p.vy = Math.sin(a)*MIN_SPEED;
-    }
-
-    p.x += p.vx; p.y += p.vy;
-    if (p.x < -5) p.x = w+5;
-    if (p.x > w+5) p.x = -5;
-    if (p.y < -5) p.y = h+5;
-    if (p.y > h+5) p.y = -5;
-
-    const twinkle = (Math.sin(timeTwinkle + p.hue*0.05)+1)/2;
-    const a = p.alpha*(0.5 + twinkle*0.5);
-    ctx.fillStyle = `hsla(${p.hue}, 80%, 70%, ${a})`;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = `hsla(${p.hue}, 80%, 70%, ${p.alpha*0.15})`;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r*4, 0, Math.PI*2); ctx.fill();
+  if (mouseX < -9000) { smoothMouseX = mouseX; smoothMouseY = mouseY; }
+  else if (smoothMouseX < -9000) { smoothMouseX = mouseX; smoothMouseY = mouseY; }
+  else {
+    smoothMouseX += (mouseX - smoothMouseX) * MOUSE_FOLLOW;
+    smoothMouseY += (mouseY - smoothMouseY) * MOUSE_FOLLOW;
   }
+
+  active.frame(viewW, viewH, time);
   requestAnimationFrame(frame);
 }
 
-const vals = document.getElementById('vals');
-function showVals(){
-  vals.textContent = `FLOW_AMP=${FLOW_AMP.toFixed(4)}  REPEL=${MOUSE_REPEL_PX}px  DAMP=${VELOCITY_DAMPING.toFixed(3)}`;
-}
+// Wiring
 window.addEventListener('mousemove', e => { mouseX=e.clientX; mouseY=e.clientY; }, { passive:true });
 document.addEventListener('mouseleave', () => { mouseX=-9999; mouseY=-9999; });
 window.addEventListener('resize', resize);
 window.addEventListener('keydown', e => {
-  if (e.key==='1') FLOW_AMP = Math.max(0, FLOW_AMP-0.002);
-  if (e.key==='2') FLOW_AMP = Math.min(0.05, FLOW_AMP+0.002);
-  if (e.key==='3') MOUSE_REPEL_PX = Math.max(0, MOUSE_REPEL_PX-10);
-  if (e.key==='4') MOUSE_REPEL_PX = Math.min(MOUSE_RADIUS, MOUSE_REPEL_PX+10);
-  if (e.key==='5') VELOCITY_DAMPING = Math.max(0.95, VELOCITY_DAMPING-0.005);
-  if (e.key==='6') VELOCITY_DAMPING = Math.min(0.999, VELOCITY_DAMPING+0.005);
+  if (e.key==='Tab' || e.key === 'q') {
+    e.preventDefault();
+    const order = ['aurora','fireflies','lattice'];
+    const idx = order.indexOf(active.name);
+    setScene(order[(idx+1) % order.length]);
+    return;
+  }
+  active.onKey(e.key);
   showVals();
 });
-showVals();
+document.querySelectorAll('#picker button').forEach(b => {
+  b.addEventListener('click', () => setScene(b.dataset.scene));
+});
+
+// Boot
+const initialScene = (() => {
+  try { return localStorage.getItem('zugaWallpaperPreviewScene') || 'aurora'; } catch { return 'aurora'; }
+})();
 resize();
+setScene(SCENES[initialScene] ? initialScene : 'aurora');
 requestAnimationFrame(frame);
 </script>
 </body>
