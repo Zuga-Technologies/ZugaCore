@@ -22,10 +22,17 @@ const MOUSE_RADIUS_SQ = MOUSE_RADIUS * MOUSE_RADIUS
 // Slightly stronger than the ZugaTechnologies hero because the aurora overlay
 // dims particle contrast, so the same numerical pull reads as quieter here.
 const MOUSE_ATTRACT = 0.022      // per-frame velocity nudge (toward cursor)
-const CENTER_TAPER_PX = 24       // force fades to 0 within this radius of cursor
+const MOUSE_REPEL_PX = 50        // inside this radius force flips outward → orbit, not suck
 const VELOCITY_DAMPING = 0.985   // glide-out after mouse leaves
 const MIN_SPEED = 0.04           // floor so particles don't stall
+const MAX_SPEED = 1.4            // soft cap so cursor wiggle can't accumulate to streaks
 const SEED_MAX_SPEED = 0.10      // upper bound on initial seed speed only
+// Low-amplitude pseudo-noise drift — without this, particles travel dead-straight
+// between cursor interactions, which reads as mechanical. sin/cos sum is cheap and
+// good enough; no simplex dep needed.
+const FLOW_AMP = 0.006
+const FLOW_SCALE_XY = 0.0018
+const FLOW_SCALE_T = 0.06
 
 interface Particle {
   x: number
@@ -153,34 +160,39 @@ function animate() {
   // Slower twinkle frequency — visual noise was contributing to "jittery" feel.
   const timeTwinkle = time * 0.9
   for (const p of particles) {
-    // Subtle mouse attraction — applied to velocity, not draw offset. Physics
-    // integration is what makes the motion feel silky.
+    // Flow-field drift — gentle path curvature so paths aren't dead-straight
+    // between cursor interactions. The repel zone (below) keeps orbits from
+    // collapsing to the singularity, so we don't need a separate center taper.
+    const ang = (Math.sin(p.x * FLOW_SCALE_XY + time * FLOW_SCALE_T)
+               + Math.cos(p.y * FLOW_SCALE_XY + time * FLOW_SCALE_T * 0.83)) * Math.PI
+    p.vx += Math.cos(ang) * FLOW_AMP
+    p.vy += Math.sin(ang) * FLOW_AMP
+
+    // Mouse force: attract outside repel zone, push out inside. Net effect is
+    // particles orbit the cursor instead of clumping into it.
     const mdx = smoothMouseX - p.x
     const mdy = smoothMouseY - p.y
     const distSq = mdx * mdx + mdy * mdy
     if (distSq < MOUSE_RADIUS_SQ && distSq > 0.0001) {
       const dist = Math.sqrt(distSq)
-      // Smoothstep edge falloff — eases force in/out at the radius boundary
-      // instead of the linear ramp's hard onset.
       const t = 1 - dist / MOUSE_RADIUS                   // 0 at edge, 1 at center
       const edge = t * t * (3 - 2 * t)                    // smoothstep
-      // Center taper — fade force to 0 as the particle approaches the cursor
-      // itself. The unit vector flips wildly when crossing through center,
-      // and this makes the magnitude already-zero by then so it never reads.
-      const c = Math.min(1, dist / CENTER_TAPER_PX)
-      const center = c * c * (3 - 2 * c)                  // smoothstep
-      const falloff = edge * center
-      p.vx += (mdx / dist) * falloff * MOUSE_ATTRACT
-      p.vy += (mdy / dist) * falloff * MOUSE_ATTRACT
+      const sign = dist < MOUSE_REPEL_PX ? -1 : 1
+      p.vx += sign * (mdx / dist) * edge * MOUSE_ATTRACT
+      p.vy += sign * (mdy / dist) * edge * MOUSE_ATTRACT
     }
 
-    // Damp + min-speed floor only — no max clamp. Cursor force accumulates
-    // freely while the mouse is engaged and naturally damps back when it leaves.
     p.vx *= VELOCITY_DAMPING
     p.vy *= VELOCITY_DAMPING
     const sp = Math.sqrt(p.vx * p.vx + p.vy * p.vy)
-    if (sp < MIN_SPEED) {
-      const a = sp > 0 ? Math.atan2(p.vy, p.vx) : Math.random() * Math.PI * 2
+    if (sp > MAX_SPEED) {
+      const k = MAX_SPEED / sp
+      p.vx *= k
+      p.vy *= k
+    } else if (sp < MIN_SPEED && sp > 0) {
+      // Preserve heading on stall — random reseeding caused visible direction snaps.
+      // Flow field guarantees sp > 0 in practice, so the sp==0 branch is unreachable.
+      const a = Math.atan2(p.vy, p.vx)
       p.vx = Math.cos(a) * MIN_SPEED
       p.vy = Math.sin(a) * MIN_SPEED
     }
@@ -192,7 +204,8 @@ function animate() {
     if (p.y < -5) p.y = h + 5
     if (p.y > h + 5) p.y = -5
 
-    const twinkle = (Math.sin(timeTwinkle + p.x * 0.01) + 1) / 2
+    // Phase by p.hue so neighboring particles don't twinkle in sync (was p.x → column-banded).
+    const twinkle = (Math.sin(timeTwinkle + p.hue * 0.05) + 1) / 2
     const a = p.alpha * (0.5 + twinkle * 0.5)
     ctx.fillStyle = `hsla(${p.hue}, 80%, 70%, ${a})`
     ctx.beginPath()
