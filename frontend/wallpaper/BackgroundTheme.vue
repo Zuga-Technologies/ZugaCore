@@ -17,6 +17,8 @@ import {
 // Built-in interactive scenes — lazy-loaded so they don't bloat the main bundle.
 const SCENE_COMPONENTS: Record<string, () => Promise<any>> = {
   'aurora-particles': () => import('./scenes/AuroraParticles.vue'),
+  'fireflies': () => import('./scenes/Fireflies.vue'),
+  'lattice': () => import('./scenes/Lattice.vue'),
 }
 
 // Widened to string so user-theme ids ('th_*') are accepted alongside the 4 hardcoded ThemeIds

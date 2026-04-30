@@ -22,7 +22,13 @@ const MOUSE_RADIUS_SQ = MOUSE_RADIUS * MOUSE_RADIUS
 // Slightly stronger than the ZugaTechnologies hero because the aurora overlay
 // dims particle contrast, so the same numerical pull reads as quieter here.
 const MOUSE_ATTRACT = 0.022      // per-frame velocity nudge (toward cursor)
-const MOUSE_REPEL_PX = 50        // inside this radius force flips outward → orbit, not suck
+const MOUSE_REPEL_PX = 50        // inside this radius radial component flips outward
+// Mouse force decomposition: radial (in/out) + tangential (sideways).
+// Pure-radial pull made particles cluster on the repel shell because they had no
+// orbital velocity — bounced in/out instead of around. Mostly-tangential force
+// gives Coriolis-style swirl so the field flows around the cursor like water.
+const MOUSE_RADIAL = 0.3         // attract/repel component
+const MOUSE_TANGENTIAL = 0.7     // perpendicular swirl component (CCW)
 const VELOCITY_DAMPING = 0.985   // glide-out after mouse leaves
 const MIN_SPEED = 0.04           // floor so particles don't stall
 const MAX_SPEED = 1.4            // soft cap so cursor wiggle can't accumulate to streaks
@@ -177,9 +183,13 @@ function animate() {
       const dist = Math.sqrt(distSq)
       const t = 1 - dist / MOUSE_RADIUS                   // 0 at edge, 1 at center
       const edge = t * t * (3 - 2 * t)                    // smoothstep
-      const sign = dist < MOUSE_REPEL_PX ? -1 : 1
-      p.vx += sign * (mdx / dist) * edge * MOUSE_ATTRACT
-      p.vy += sign * (mdy / dist) * edge * MOUSE_ATTRACT
+      const rx = mdx / dist                         // radial unit vector
+      const ry = mdy / dist
+      const tx = -ry                                // tangential (perpendicular, CCW)
+      const ty = rx
+      const sign = dist < MOUSE_REPEL_PX ? -1 : 1   // radial flips inside repel zone
+      p.vx += (sign * rx * MOUSE_RADIAL + tx * MOUSE_TANGENTIAL) * edge * MOUSE_ATTRACT
+      p.vy += (sign * ry * MOUSE_RADIAL + ty * MOUSE_TANGENTIAL) * edge * MOUSE_ATTRACT
     }
 
     p.vx *= VELOCITY_DAMPING

@@ -9,6 +9,8 @@ export type ThemeId =
   | 'none'
   | 'custom'
   | 'aurora-particles'
+  | 'fireflies'
+  | 'lattice'
 
 export interface ThemeDefinition {
   id: ThemeId
@@ -39,6 +41,22 @@ export const THEMES: ThemeDefinition[] = [
     preview: 'linear-gradient(135deg, #1a0a2e, #2a1a5e, #0ea5e9)',
     scene: 'aurora-particles',
     fallbackBg: 'linear-gradient(135deg, #0a0a1a, #1a0a2e)',
+  },
+  {
+    id: 'fireflies',
+    name: 'Fireflies',
+    description: 'Warm pulsing fireflies drifting through forest dusk',
+    preview: 'linear-gradient(135deg, #0b1d1d, #112024, #2d2a14)',
+    scene: 'fireflies',
+    fallbackBg: 'linear-gradient(180deg, #0b1d1d, #050a14)',
+  },
+  {
+    id: 'lattice',
+    name: 'Lattice',
+    description: 'Cool geometric grid that ripples under your cursor',
+    preview: 'linear-gradient(135deg, #061827, #0a2a3e, #061224)',
+    scene: 'lattice',
+    fallbackBg: 'radial-gradient(circle at 50% 50%, #0a2a3e, #050a14)',
   },
   {
     id: 'custom',
