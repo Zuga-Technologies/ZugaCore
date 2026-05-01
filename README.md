@@ -84,7 +84,7 @@ from core.plugins.interface import StudioPlugin
 
 ### StudioPlugin (embedded)
 
-Runs inside ZugaApp, shares its database and auth. The studio provides a FastAPI router that gets mounted into the host app.
+Runs inside [ZugaApp](https://github.com/Zuga-Technologies/ZugaApp), shares its database and auth. The studio provides a FastAPI router that gets mounted into the host app.
 
 ```python
 class MyStudioPlugin(StudioPlugin):
@@ -98,7 +98,7 @@ class MyStudioPlugin(StudioPlugin):
 
 ### ProxyPlugin (standalone)
 
-For studios that run their own backend 24/7. ZugaApp forwards requests to the standalone service.
+For studios that run their own backend 24/7. [ZugaApp](https://github.com/Zuga-Technologies/ZugaApp) forwards requests to the standalone service.
 
 ```python
 class MyTraderPlugin(ProxyPlugin):
