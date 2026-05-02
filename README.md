@@ -2,6 +2,8 @@
 
 Shared foundation layer for the [Zuga](https://github.com/Zuga-Technologies) studio ecosystem. Provides authentication, database management, a credit/token system, a Tailwind theme, and plugin interfaces used by all Zuga studios.
 
+Main site for business communications: [ZugaTechnologies](https://zugatechnologies.com/)
+
 ## What's Inside
 
 ### Backend (Python)
@@ -84,7 +86,7 @@ from core.plugins.interface import StudioPlugin
 
 ### StudioPlugin (embedded)
 
-Runs inside ZugaApp, shares its database and auth. The studio provides a FastAPI router that gets mounted into the host app.
+Runs inside [ZugaApp](https://github.com/Zuga-Technologies/ZugaApp), shares its database and auth. The studio provides a FastAPI router that gets mounted into the host app.
 
 ```python
 class MyStudioPlugin(StudioPlugin):
@@ -98,7 +100,7 @@ class MyStudioPlugin(StudioPlugin):
 
 ### ProxyPlugin (standalone)
 
-For studios that run their own backend 24/7. ZugaApp forwards requests to the standalone service.
+For studios that run their own backend 24/7. [ZugaApp](https://github.com/Zuga-Technologies/ZugaApp) forwards requests to the standalone service.
 
 ```python
 class MyTraderPlugin(ProxyPlugin):
