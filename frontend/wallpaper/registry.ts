@@ -81,6 +81,7 @@ export const THEMES: ThemeDefinition[] = [
 
 export type ParticleShape = 'circle' | 'square' | 'streak' | 'sparkle' | 'cross'
 export type GradientMode = 'linear-diagonal' | 'linear-vertical' | 'radial' | 'conic'
+export type CursorMode = 'auto' | 'attract' | 'repel' | 'swirl' | 'explode' | 'none'
 
 export interface AIParticleNebula {
   count: number      // 0-3
@@ -112,6 +113,9 @@ export interface AIParticleConfig {
     trail?: number
     windX?: number
     windY?: number
+    // Tier 3 additions — also optional.
+    connectDistance?: number
+    cursorMode?: CursorMode
   }
   flow: { amp: number; swirl: number }
   // Tier 2 additions — optional.

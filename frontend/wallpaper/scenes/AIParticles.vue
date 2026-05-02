@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getAIParticleConfig, type AIParticleConfig, type ParticleShape, type GradientMode } from '../registry'
+import { getAIParticleConfig, type AIParticleConfig, type ParticleShape, type GradientMode, type CursorMode } from '../registry'
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 let raf: number | null = null
@@ -19,6 +19,7 @@ const DEFAULT_CONFIG: AIParticleConfig = {
     sizeMin: 0.8, sizeMax: 2.5, glow: 0.5, speed: 1.0,
     mouseRadius: 220, mouseAttract: 0.5,
     shape: 'circle', trail: 0, windX: 0, windY: 0,
+    connectDistance: 0, cursorMode: 'auto',
   },
   flow: { amp: 0.006, swirl: 0.7 },
   nebula: { count: 0, hueBase: 240, intensity: 0.4, driftSpeed: 0.5 },
@@ -124,6 +125,77 @@ function paintVignette(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.fillRect(0, 0, w, h)
 }
 
+// Constellation lines — connects particle pairs within connectDistance via a
+// spatial grid so the cost stays ~O(n) instead of O(n²) for big counts. Each
+// pair is visited exactly once by checking only cells (same), (right), (down-
+// left), (down), (down-right). Within the same cell, only j > i pairs.
+function paintConnections(ctx: CanvasRenderingContext2D, sat: number, light: number) {
+  const D = cfg.particles.connectDistance ?? 0
+  if (D <= 0) return
+  const cellSize = D
+  const grid = new Map<string, number[]>()
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i]
+    const c = Math.floor(p.x / cellSize)
+    const r = Math.floor(p.y / cellSize)
+    const k = `${c},${r}`
+    let bin = grid.get(k)
+    if (!bin) { bin = []; grid.set(k, bin) }
+    bin.push(i)
+  }
+  const D2 = D * D
+  const offsets: Array<[number, number]> = [[0,0],[1,0],[-1,1],[0,1],[1,1]]
+  ctx.lineWidth = 0.6
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i]
+    const c = Math.floor(p.x / cellSize)
+    const r = Math.floor(p.y / cellSize)
+    for (const [dc, dr] of offsets) {
+      const bin = grid.get(`${c + dc},${r + dr}`)
+      if (!bin) continue
+      for (const j of bin) {
+        if (dc === 0 && dr === 0) { if (j <= i) continue } else if (j === i) continue
+        const q = particles[j]
+        const dx = q.x - p.x
+        const dy = q.y - p.y
+        const d2 = dx * dx + dy * dy
+        if (d2 > D2 || d2 < 0.0001) continue
+        const t = 1 - Math.sqrt(d2) / D
+        // Quadratic falloff so only very close pairs read clearly — avoids
+        // visual clutter when there are 100+ particles.
+        const alpha = t * t * 0.5
+        const hue = (p.hue + q.hue) * 0.5
+        ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`
+        ctx.beginPath()
+        ctx.moveTo(p.x, p.y)
+        ctx.lineTo(q.x, q.y)
+        ctx.stroke()
+      }
+    }
+  }
+}
+
+// Click impulse — only active when cursorMode === 'explode'. Pushes nearby
+// particles outward from the click point with a quadratic-falloff force.
+function onClick(e: MouseEvent) {
+  if ((cfg.particles.cursorMode ?? 'auto') !== 'explode') return
+  const cx = e.clientX
+  const cy = e.clientY
+  const radius = cfg.particles.mouseRadius
+  const radius2 = radius * radius
+  for (const p of particles) {
+    const dx = p.x - cx
+    const dy = p.y - cy
+    const d2 = dx * dx + dy * dy
+    if (d2 > radius2 || d2 < 0.0001) continue
+    const d = Math.sqrt(d2)
+    const t = 1 - d / radius
+    const force = 8 * t * t   // max ~8 px/frame impulse at click center
+    p.vx += (dx / d) * force
+    p.vy += (dy / d) * force
+  }
+}
+
 let bgGrad: CanvasGradient | null = null
 function buildBgGrad(ctx: CanvasRenderingContext2D, w: number, h: number) {
   const colors = cfg.background.colors.length > 0 ? cfg.background.colors : DEFAULT_CONFIG.background.colors
@@ -204,6 +276,16 @@ function animate() {
   const shape: ParticleShape = cfg.particles.shape ?? 'circle'
   const windX = cfg.particles.windX ?? 0
   const windY = cfg.particles.windY ?? 0
+  const cursorMode: CursorMode = cfg.particles.cursorMode ?? 'auto'
+  // Per-mode cursor coefficients. 'auto' keeps Tier 0-2 swirl-leaning blend.
+  let cmRadial = MOUSE_RADIAL
+  let cmTangential = MOUSE_TANGENTIAL
+  let cmSign: 0 | 1 | -1 = 0  // 0 = use radial sign from repel zone (auto), +1 = always attract, -1 = always repel
+  if (cursorMode === 'attract')      { cmRadial = 1.0; cmTangential = 0.0; cmSign = 1 }
+  else if (cursorMode === 'repel')   { cmRadial = 1.0; cmTangential = 0.0; cmSign = -1 }
+  else if (cursorMode === 'swirl')   { cmRadial = 0.0; cmTangential = 1.0; cmSign = 1 }
+  // 'explode' and 'none' bypass continuous cursor force entirely (handled below).
+  const cursorEnabled = cursorMode !== 'explode' && cursorMode !== 'none'
   const timeTwinkle = time * 0.9
 
   for (const p of particles) {
@@ -212,20 +294,24 @@ function animate() {
     p.vx += Math.cos(ang) * flowAmp + windX
     p.vy += Math.sin(ang) * flowAmp + windY
 
-    const mdx = smoothMouseX - p.x
-    const mdy = smoothMouseY - p.y
-    const distSq = mdx * mdx + mdy * mdy
-    if (distSq < MOUSE_RADIUS_SQ && distSq > 0.0001) {
-      const dist = Math.sqrt(distSq)
-      const t = 1 - dist / cfg.particles.mouseRadius
-      const edge = t * t * (3 - 2 * t)
-      const rx = mdx / dist
-      const ry = mdy / dist
-      const tx = -ry
-      const ty = rx
-      const sign = dist < MOUSE_REPEL_PX ? -1 : 1
-      p.vx += (sign * rx * MOUSE_RADIAL + tx * MOUSE_TANGENTIAL) * edge * MOUSE_ATTRACT_SCALED
-      p.vy += (sign * ry * MOUSE_RADIAL + ty * MOUSE_TANGENTIAL) * edge * MOUSE_ATTRACT_SCALED
+    if (cursorEnabled) {
+      const mdx = smoothMouseX - p.x
+      const mdy = smoothMouseY - p.y
+      const distSq = mdx * mdx + mdy * mdy
+      if (distSq < MOUSE_RADIUS_SQ && distSq > 0.0001) {
+        const dist = Math.sqrt(distSq)
+        const t = 1 - dist / cfg.particles.mouseRadius
+        const edge = t * t * (3 - 2 * t)
+        const rx = mdx / dist
+        const ry = mdy / dist
+        const tx = -ry
+        const ty = rx
+        // sign: explicit modes hard-set to attract/repel; 'auto' keeps the
+        // close-range repel zone so particles orbit instead of clumping.
+        const sign = cmSign !== 0 ? cmSign : (dist < MOUSE_REPEL_PX ? -1 : 1)
+        p.vx += (sign * rx * cmRadial + tx * cmTangential) * edge * MOUSE_ATTRACT_SCALED
+        p.vy += (sign * ry * cmRadial + ty * cmTangential) * edge * MOUSE_ATTRACT_SCALED
+      }
     }
 
     p.vx *= VELOCITY_DAMPING
@@ -298,6 +384,10 @@ function animate() {
       ctx.fillRect(p.x - arm, p.y - w / 2, arm * 2, w)
     }
   }
+
+  // Constellation lines on top of particles (lower-alpha so they read as a web
+  // not a crosshatch). Off when connectDistance is 0.
+  paintConnections(ctx, sat, light)
 
   // Vignette goes last — drawn over particles to darken the corners cinematically.
   paintVignette(ctx, w, h)
@@ -382,6 +472,7 @@ onMounted(() => {
   window.addEventListener('resize', scheduleResize)
   window.addEventListener('mousemove', onMouseMove, { passive: true })
   document.addEventListener('mouseleave', onMouseLeave)
+  window.addEventListener('click', onClick)
   window.addEventListener('storage', onStorage)
   window.addEventListener('zuga:ai-particle-config-updated', onConfigUpdated)
 
@@ -396,6 +487,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', scheduleResize)
   window.removeEventListener('mousemove', onMouseMove)
   document.removeEventListener('mouseleave', onMouseLeave)
+  window.removeEventListener('click', onClick)
   window.removeEventListener('storage', onStorage)
   window.removeEventListener('zuga:ai-particle-config-updated', onConfigUpdated)
 })
