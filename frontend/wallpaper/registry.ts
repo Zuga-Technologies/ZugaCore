@@ -11,6 +11,7 @@ export type ThemeId =
   | 'aurora-particles'
   | 'fireflies'
   | 'lattice'
+  | 'ai-particles'
 
 export interface ThemeDefinition {
   id: ThemeId
@@ -59,12 +60,61 @@ export const THEMES: ThemeDefinition[] = [
     fallbackBg: 'radial-gradient(circle at 50% 50%, #0a2a3e, #050a14)',
   },
   {
+    id: 'ai-particles',
+    name: 'AI Particles',
+    description: 'Describe a vibe — AI tunes the particle field',
+    preview: 'linear-gradient(135deg, #2a0f4a, #6e2db5, #f43f9d)',
+    scene: 'ai-particles',
+    fallbackBg: 'linear-gradient(135deg, #1a0a2e, #2a0f4a)',
+  },
+  {
     id: 'custom',
     name: 'Custom',
     description: 'Upload your own image as a wallpaper',
     preview: 'linear-gradient(135deg, #333, #555, #333)',
   },
 ]
+
+// --- AI Particle wallpaper config ---
+// Schema mirrors backend ParticleConfig in ZugaApp/backend/core/wallpaper/schemas.py.
+// Stored client-side because it's a small render-config blob, not an asset.
+
+export interface AIParticleConfig {
+  name: string
+  background: { colors: string[] }
+  particles: {
+    count: number
+    hueBase: number
+    hueRange: number
+    saturation: number
+    lightness: number
+    sizeMin: number
+    sizeMax: number
+    glow: number
+    speed: number
+    mouseRadius: number
+    mouseAttract: number
+  }
+  flow: { amp: number; swirl: number }
+}
+
+const AI_PARTICLE_CONFIG_KEY = 'zugalife-bg-ai-particle-config'
+const AI_PARTICLE_PROMPT_KEY = 'zugalife-bg-ai-particle-prompt'
+
+export function getAIParticleConfig(): AIParticleConfig | null {
+  const raw = localStorage.getItem(AI_PARTICLE_CONFIG_KEY)
+  if (!raw) return null
+  try { return JSON.parse(raw) as AIParticleConfig } catch { return null }
+}
+export function saveAIParticleConfig(cfg: AIParticleConfig) {
+  localStorage.setItem(AI_PARTICLE_CONFIG_KEY, JSON.stringify(cfg))
+}
+export function getAIParticlePrompt(): string {
+  return localStorage.getItem(AI_PARTICLE_PROMPT_KEY) || ''
+}
+export function saveAIParticlePrompt(prompt: string) {
+  localStorage.setItem(AI_PARTICLE_PROMPT_KEY, prompt)
+}
 
 // --- AI Ambient helpers ---
 // Note: the 'theme' values stored under AI_AMBIENT_KEY are NOT ThemeId values.
