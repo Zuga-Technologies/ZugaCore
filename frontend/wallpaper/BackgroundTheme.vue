@@ -100,6 +100,16 @@ function buildWallpaperUrl(w: UserWallpaper): string {
   return `/api/image/saved/${w.source_id}`  // source_studio === 'image'
 }
 
+// Persist rotation position per-theme so remounts (e.g. each ZugaLife start)
+// don't always snap back to wallpapers[0].
+function rotationStorageKey(themeId: string) { return `zugalife:user-theme-rotation:${themeId}` }
+function readSavedRotationId(themeId: string): string | null {
+  try { return localStorage.getItem(rotationStorageKey(themeId)) } catch { return null }
+}
+function writeSavedRotationId(themeId: string, wallpaperId: string) {
+  try { localStorage.setItem(rotationStorageKey(themeId), wallpaperId) } catch { /* quota / disabled */ }
+}
+
 async function startUserTheme(themeId: string) {
   stopUserTheme()
   const myVersion = ++userThemeReqVersion
@@ -129,11 +139,14 @@ async function startUserTheme(themeId: string) {
     // pinned wallpaper deleted/missing — fall through to rotation
   }
 
-  // Rotation mode
-  userCurrentIndex.value = 0
-  const first = userWallpapers.value[0]
+  // Rotation mode — resume from last-shown wallpaper if we have one persisted.
+  const savedId = readSavedRotationId(themeId)
+  const resumeIdx = savedId ? userWallpapers.value.findIndex(w => w.id === savedId) : -1
+  userCurrentIndex.value = resumeIdx >= 0 ? resumeIdx : 0
+  const first = userWallpapers.value[userCurrentIndex.value]
   userCurrentUrl.value = buildWallpaperUrl(first)
   userCurrentKind.value = first.kind
+  writeSavedRotationId(themeId, first.id)
   const intervalMs = (userThemeData.value?.rotation_interval_minutes ?? 30) * 60 * 1000
   if (userWallpapers.value.length > 1) {
     userRotateTimer = setInterval(() => {
@@ -143,6 +156,7 @@ async function startUserTheme(themeId: string) {
       const next = userWallpapers.value[userCurrentIndex.value]
       userCurrentUrl.value = buildWallpaperUrl(next)
       userCurrentKind.value = next.kind
+      writeSavedRotationId(themeId, next.id)
       userShowCurrent.value = false
       requestAnimationFrame(() => { userShowCurrent.value = true })
     }, intervalMs)
