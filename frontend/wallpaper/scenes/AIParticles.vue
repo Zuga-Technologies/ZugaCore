@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getAIParticleConfig, type AIParticleConfig } from '../registry'
+import { getAIParticleConfig, type AIParticleConfig, type ParticleShape } from '../registry'
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 let raf: number | null = null
@@ -18,6 +18,7 @@ const DEFAULT_CONFIG: AIParticleConfig = {
     count: 60, hueBase: 220, hueRange: 80, saturation: 70, lightness: 65,
     sizeMin: 0.8, sizeMax: 2.5, glow: 0.5, speed: 1.0,
     mouseRadius: 220, mouseAttract: 0.5,
+    shape: 'circle', trail: 0, windX: 0, windY: 0,
   },
   flow: { amp: 0.006, swirl: 0.7 },
 }
@@ -109,8 +110,16 @@ function animate() {
   const time = performance.now() / 1000
 
   if (!bgGrad) bgGrad = buildBgGrad(ctx, w, h)
+  // Trail effect: paint bg at reduced alpha so previous frame's particles
+  // bleed through and fade. trail=0 → opaque repaint (crisp). trail=0.9 → alpha
+  // 0.1, particles leave long dim wakes. Capped below 1 so the canvas can't
+  // accumulate forever (no full-persist).
+  const trail = Math.max(0, Math.min(0.95, cfg.particles.trail ?? 0))
+  const bgAlpha = 1 - trail
+  if (bgAlpha < 1) ctx.globalAlpha = bgAlpha
   ctx.fillStyle = bgGrad
   ctx.fillRect(0, 0, w, h)
+  ctx.globalAlpha = 1
 
   if (mouseX < -9000) {
     smoothMouseX = mouseX
@@ -128,13 +137,16 @@ function animate() {
   const sat = cfg.particles.saturation
   const light = cfg.particles.lightness
   const glow = cfg.particles.glow
+  const shape: ParticleShape = cfg.particles.shape ?? 'circle'
+  const windX = cfg.particles.windX ?? 0
+  const windY = cfg.particles.windY ?? 0
   const timeTwinkle = time * 0.9
 
   for (const p of particles) {
     const ang = (Math.sin(p.x * FLOW_SCALE_XY + time * FLOW_SCALE_T)
                + Math.cos(p.y * FLOW_SCALE_XY + time * FLOW_SCALE_T * 0.83)) * Math.PI
-    p.vx += Math.cos(ang) * flowAmp
-    p.vy += Math.sin(ang) * flowAmp
+    p.vx += Math.cos(ang) * flowAmp + windX
+    p.vy += Math.sin(ang) * flowAmp + windY
 
     const mdx = smoothMouseX - p.x
     const mdy = smoothMouseY - p.y
@@ -174,16 +186,52 @@ function animate() {
 
     const twinkle = (Math.sin(timeTwinkle + p.hue * 0.05) + 1) / 2
     const a = p.alpha * (0.5 + twinkle * 0.5)
-    ctx.fillStyle = `hsla(${p.hue}, ${sat}%, ${light}%, ${a})`
-    ctx.beginPath()
-    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
-    ctx.fill()
+    const fill = `hsla(${p.hue}, ${sat}%, ${light}%, ${a})`
 
-    if (glow > 0) {
+    // Soft glow halo (drawn first, behind body) — circles/sparkles read best with it.
+    if (glow > 0 && shape !== 'streak') {
       ctx.fillStyle = `hsla(${p.hue}, ${sat}%, ${light}%, ${p.alpha * 0.18 * glow})`
       ctx.beginPath()
       ctx.arc(p.x, p.y, p.r * (3 + glow * 3), 0, Math.PI * 2)
       ctx.fill()
+    }
+
+    ctx.fillStyle = fill
+    if (shape === 'circle') {
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
+      ctx.fill()
+    } else if (shape === 'square') {
+      ctx.fillRect(p.x - p.r, p.y - p.r, p.r * 2, p.r * 2)
+    } else if (shape === 'streak') {
+      // Line drawn opposite to velocity (the trail). Length proportional to speed
+      // so fast particles look longer; min length keeps slow ones visible.
+      const sp = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 0.0001
+      const len = Math.max(p.r * 4, sp * 18)
+      const ux = -p.vx / sp
+      const uy = -p.vy / sp
+      ctx.strokeStyle = fill
+      ctx.lineWidth = p.r * 1.4
+      ctx.lineCap = 'round'
+      ctx.beginPath()
+      ctx.moveTo(p.x, p.y)
+      ctx.lineTo(p.x + ux * len, p.y + uy * len)
+      ctx.stroke()
+    } else if (shape === 'sparkle') {
+      // 4-point star: long thin vertical + horizontal beams + small core.
+      const beam = p.r * 3.2
+      const w = p.r * 0.55
+      ctx.fillRect(p.x - w / 2, p.y - beam, w, beam * 2)  // vertical beam
+      ctx.fillRect(p.x - beam, p.y - w / 2, beam * 2, w)  // horizontal beam
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, p.r * 0.9, 0, Math.PI * 2)
+      ctx.fill()
+    } else if (shape === 'cross') {
+      // Plus sign — symmetric, neon-marker aesthetic.
+      const arm = p.r * 1.8
+      const w = Math.max(0.8, p.r * 0.55)
+      ctx.fillRect(p.x - w / 2, p.y - arm, w, arm * 2)
+      ctx.fillRect(p.x - arm, p.y - w / 2, arm * 2, w)
     }
   }
 

@@ -79,6 +79,8 @@ export const THEMES: ThemeDefinition[] = [
 // Schema mirrors backend ParticleConfig in ZugaApp/backend/core/wallpaper/schemas.py.
 // Stored client-side because it's a small render-config blob, not an asset.
 
+export type ParticleShape = 'circle' | 'square' | 'streak' | 'sparkle' | 'cross'
+
 export interface AIParticleConfig {
   name: string
   background: { colors: string[] }
@@ -94,6 +96,11 @@ export interface AIParticleConfig {
     speed: number
     mouseRadius: number
     mouseAttract: number
+    // Tier 1 additions — optional in stored configs to keep older payloads valid.
+    shape?: ParticleShape
+    trail?: number
+    windX?: number
+    windY?: number
   }
   flow: { amp: number; swirl: number }
 }
