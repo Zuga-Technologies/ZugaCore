@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getAIParticleConfig, type AIParticleConfig, type ParticleShape } from '../registry'
+import { getAIParticleConfig, type AIParticleConfig, type ParticleShape, type GradientMode } from '../registry'
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 let raf: number | null = null
@@ -13,7 +13,7 @@ const MOUSE_FOLLOW = 0.18
 
 const DEFAULT_CONFIG: AIParticleConfig = {
   name: 'Default',
-  background: { colors: ['#0a0a1a', '#1a0a2e', '#0ea5e9'] },
+  background: { colors: ['#0a0a1a', '#1a0a2e', '#0ea5e9'], mode: 'linear-diagonal' },
   particles: {
     count: 60, hueBase: 220, hueRange: 80, saturation: 70, lightness: 65,
     sizeMin: 0.8, sizeMax: 2.5, glow: 0.5, speed: 1.0,
@@ -21,6 +21,8 @@ const DEFAULT_CONFIG: AIParticleConfig = {
     shape: 'circle', trail: 0, windX: 0, windY: 0,
   },
   flow: { amp: 0.006, swirl: 0.7 },
+  nebula: { count: 0, hueBase: 240, intensity: 0.4, driftSpeed: 0.5 },
+  vignette: 0,
 }
 
 let cfg: AIParticleConfig = getAIParticleConfig() || DEFAULT_CONFIG
@@ -72,7 +74,11 @@ function makeParticle(w: number, h: number): Particle {
 }
 
 function reconcileParticles(w: number, h: number) {
-  const want = cfg.particles.count
+  // Adaptive cap — small viewports get fewer particles regardless of LLM choice.
+  // Mobile screens can't afford 200 alpha-blended canvas circles per frame.
+  let want = cfg.particles.count
+  if (w < 500) want = Math.min(want, 80)
+  else if (w < 800) want = Math.min(want, 150)
   for (const p of particles) {
     if (p.x < 0 || p.x > w) p.x = Math.random() * w
     if (p.y < 0 || p.y > h) p.y = Math.random() * h
@@ -81,10 +87,64 @@ function reconcileParticles(w: number, h: number) {
   if (particles.length > want) particles.length = want
 }
 
+function paintNebulas(ctx: CanvasRenderingContext2D, w: number, h: number, time: number) {
+  const n = Math.max(0, Math.min(3, cfg.nebula?.count ?? 0))
+  if (n === 0) return
+  const intensity = cfg.nebula!.intensity
+  const driftSpeed = cfg.nebula!.driftSpeed
+  const baseHue = cfg.nebula!.hueBase
+  // Additive blending so blobs amplify rather than darken when they overlap —
+  // this is what gives the dreamy "color bloom" feel against a dark bg.
+  ctx.globalCompositeOperation = 'lighter'
+  for (let i = 0; i < n; i++) {
+    const phase = i * 2.1
+    const orbitR = Math.min(w, h) * (0.22 + 0.1 * (i % 2))
+    const cx = w / 2 + Math.cos(time * driftSpeed * 0.1 + phase) * orbitR
+    const cy = h / 2 + Math.sin(time * driftSpeed * 0.13 + phase) * orbitR * 0.7
+    const radius = Math.max(w, h) * 0.55
+    const hue = baseHue + i * 35
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
+    grad.addColorStop(0, `hsla(${hue}, 75%, 55%, ${0.18 * intensity})`)
+    grad.addColorStop(0.5, `hsla(${hue}, 75%, 45%, ${0.07 * intensity})`)
+    grad.addColorStop(1, `hsla(${hue}, 75%, 35%, 0)`)
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, w, h)
+  }
+  ctx.globalCompositeOperation = 'source-over'
+}
+
+function paintVignette(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const v = cfg.vignette ?? 0
+  if (v <= 0) return
+  const r = Math.max(w, h) * 0.75
+  const grad = ctx.createRadialGradient(w / 2, h / 2, r * 0.4, w / 2, h / 2, r)
+  grad.addColorStop(0, 'rgba(0,0,0,0)')
+  grad.addColorStop(1, `rgba(0,0,0,${v * 0.7})`)
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, w, h)
+}
+
 let bgGrad: CanvasGradient | null = null
 function buildBgGrad(ctx: CanvasRenderingContext2D, w: number, h: number) {
   const colors = cfg.background.colors.length > 0 ? cfg.background.colors : DEFAULT_CONFIG.background.colors
-  const g = ctx.createLinearGradient(0, 0, w, h)
+  const mode: GradientMode = cfg.background.mode ?? 'linear-diagonal'
+  let g: CanvasGradient
+  if (mode === 'linear-vertical') {
+    g = ctx.createLinearGradient(0, 0, 0, h)
+  } else if (mode === 'radial') {
+    // Center-out — first color at center, last at edges. Great for cosmic depth.
+    g = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.7)
+  } else if (mode === 'conic') {
+    // Conic isn't on every browser's CanvasRenderingContext2D, fall back to diagonal
+    // when unsupported. Chromium has it; older Safari might not.
+    if (typeof (ctx as any).createConicGradient === 'function') {
+      g = (ctx as any).createConicGradient(0, w / 2, h / 2)
+    } else {
+      g = ctx.createLinearGradient(0, 0, w, h)
+    }
+  } else {
+    g = ctx.createLinearGradient(0, 0, w, h) // linear-diagonal (default)
+  }
   if (colors.length === 1) {
     g.addColorStop(0, colors[0])
     g.addColorStop(1, colors[0])
@@ -120,6 +180,10 @@ function animate() {
   ctx.fillStyle = bgGrad
   ctx.fillRect(0, 0, w, h)
   ctx.globalAlpha = 1
+
+  // Nebula blobs sit between the bg gradient and the particles, so particles
+  // still read as the foreground but the bg has depth.
+  paintNebulas(ctx, w, h, time)
 
   if (mouseX < -9000) {
     smoothMouseX = mouseX
@@ -234,6 +298,9 @@ function animate() {
       ctx.fillRect(p.x - arm, p.y - w / 2, arm * 2, w)
     }
   }
+
+  // Vignette goes last — drawn over particles to darken the corners cinematically.
+  paintVignette(ctx, w, h)
 
   raf = requestAnimationFrame(animate)
 }

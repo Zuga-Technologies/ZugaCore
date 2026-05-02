@@ -80,10 +80,21 @@ export const THEMES: ThemeDefinition[] = [
 // Stored client-side because it's a small render-config blob, not an asset.
 
 export type ParticleShape = 'circle' | 'square' | 'streak' | 'sparkle' | 'cross'
+export type GradientMode = 'linear-diagonal' | 'linear-vertical' | 'radial' | 'conic'
+
+export interface AIParticleNebula {
+  count: number      // 0-3
+  hueBase: number    // 0-360
+  intensity: number  // 0-1
+  driftSpeed: number // 0-1
+}
 
 export interface AIParticleConfig {
   name: string
-  background: { colors: string[] }
+  background: {
+    colors: string[]
+    mode?: GradientMode
+  }
   particles: {
     count: number
     hueBase: number
@@ -103,6 +114,9 @@ export interface AIParticleConfig {
     windY?: number
   }
   flow: { amp: number; swirl: number }
+  // Tier 2 additions — optional.
+  nebula?: AIParticleNebula
+  vignette?: number
 }
 
 const AI_PARTICLE_CONFIG_KEY = 'zugalife-bg-ai-particle-config'
