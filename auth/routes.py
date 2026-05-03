@@ -52,7 +52,6 @@ from core.auth.middleware import get_current_user, require_admin
 from core.auth.models import CurrentUser
 from core.auth.repository import (
     _is_admin_email,
-    resolve_role,
     get_onboarding_state,
     get_user_by_email,
     link_supertokens_id,
@@ -165,7 +164,6 @@ class UserResponse(BaseModel):
     email: str
     role: str
     is_admin: bool
-    is_beta: bool = False
     name: str | None = None
     avatar_url: str | None = None
 
@@ -203,8 +201,7 @@ def _user_dict(user: CurrentUser) -> dict:
     """Standard user dict for LoginResponse."""
     return {
         "id": user.id, "email": user.email, "role": user.role,
-        "is_admin": user.is_admin, "is_beta": user.is_beta,
-        "name": user.name, "avatar_url": user.avatar_url,
+        "is_admin": user.is_admin, "name": user.name, "avatar_url": user.avatar_url,
     }
 
 
@@ -330,7 +327,7 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
         record = await upsert_user(email=email, auth_provider="password")
     await link_supertokens_id(email, st_user_id)
 
-    role = resolve_role(email, default=record.role)
+    role = "admin" if _is_admin_email(email) else record.role
     user = CurrentUser(
         id=record.id, email=record.email, role=role,
         name=record.name, avatar_url=record.avatar_url,
@@ -632,7 +629,6 @@ async def me(user: CurrentUser = Depends(get_current_user)) -> UserResponse:
         email=user.email,
         role=user.role,
         is_admin=user.is_admin,
-        is_beta=user.is_beta,
         name=user.name,
         avatar_url=user.avatar_url,
     )
@@ -775,7 +771,7 @@ async def admin_reset_user(
     if record is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    new_role = resolve_role(record.email, default="user")
+    new_role = "admin" if _is_admin_email(record.email) else "user"
 
     async with get_session() as session:
         result = await session.execute(

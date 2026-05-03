@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from core.auth.middleware import get_current_user, require_admin
 from core.auth.models import CurrentUser, UserRecord
-from core.auth.repository import _is_admin_email, resolve_role
+from core.auth.repository import _is_admin_email
 from core.credits.manager import (
     _get_welcome_tokens,
     add_purchased_tokens,
@@ -613,9 +613,7 @@ async def cli_sync_roles(
         users = result.scalars().all()
 
         for user in users:
-            # Honor ALLOWED_EMAILS override (admin/beta); preserve manual beta
-            # grants in DB by defaulting to the existing role rather than "user".
-            expected_role = resolve_role(user.email, default=user.role)
+            expected_role = "admin" if _is_admin_email(user.email) else "user"
             if user.role != expected_role:
                 old_role = user.role
                 user.role = expected_role

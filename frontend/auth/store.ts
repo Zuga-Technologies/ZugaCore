@@ -7,7 +7,6 @@ interface User {
   email: string
   role: string
   is_admin: boolean
-  is_beta?: boolean
   name?: string | null
   avatar_url?: string | null
 }
@@ -43,11 +42,6 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => user.value !== null)
   const isAdmin = computed(() => user.value?.is_admin ?? false)
-  const isBeta = computed(() => user.value?.is_beta ?? false)
-  // Studio visibility gate — admins and beta testers can see studios marked
-  // adminOnly in their plugin manifest. Beta does NOT grant admin endpoint
-  // access (backend `is_admin` stays strict on role=='admin').
-  const canSeePrivateStudios = computed(() => isAdmin.value || isBeta.value)
   const authMode = computed(() => authConfig.value?.auth_mode ?? 'dev')
   const googleClientId = computed(() => authConfig.value?.google_client_id ?? null)
   const providers = computed(() => authConfig.value?.providers ?? [])
@@ -266,7 +260,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   return {
     user, loading, error, message, authConfig, lastRefreshToken,
-    isAuthenticated, isAdmin, isBeta, canSeePrivateStudios, authMode, googleClientId, providers,
+    isAuthenticated, isAdmin, authMode, googleClientId, providers,
     fetchAuthConfig, login, passwordLogin, register,
     forgotPassword, resetPassword, verifyEmail,
     loginWithGoogle, loginWithOAuth, getOAuthUrl,

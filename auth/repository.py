@@ -30,35 +30,9 @@ def _parse_allowed_emails() -> dict[str, str]:
     return result
 
 
-def _get_role_for_email(email: str) -> str | None:
-    """Return the role assigned to this email in ALLOWED_EMAILS, or None if not whitelisted."""
-    return _parse_allowed_emails().get(email.lower())
-
-
 def _is_admin_email(email: str) -> bool:
     """Check if email has admin role in ALLOWED_EMAILS."""
-    return _get_role_for_email(email) == "admin"
-
-
-def _is_beta_email(email: str) -> bool:
-    """Check if email has beta role in ALLOWED_EMAILS."""
-    return _get_role_for_email(email) == "beta"
-
-
-_VALID_ROLES = {"admin", "beta", "user"}
-
-
-def resolve_role(email: str, default: str = "user") -> str:
-    """Resolve effective role for an email.
-
-    ALLOWED_EMAILS overrides — if the email is whitelisted with a known role
-    (admin/beta/user), use that. Otherwise fall back to `default` (typically
-    the role already on the DB record).
-    """
-    role = _get_role_for_email(email)
-    if role in _VALID_ROLES:
-        return role
-    return default
+    return _parse_allowed_emails().get(email.lower()) == "admin"
 
 
 async def upsert_user(
@@ -77,10 +51,7 @@ async def upsert_user(
         )
         user = result.scalar_one_or_none()
 
-        # ALLOWED_EMAILS wins over default; preserve existing DB role if user
-        # already exists and isn't whitelisted (e.g. manual beta grant in DB).
-        existing_role = user.role if user is not None else "user"
-        role = resolve_role(email, default=existing_role)
+        role = "admin" if _is_admin_email(email) else "user"
         auto_verify = auth_provider == "google"
 
         if user is None:
