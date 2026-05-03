@@ -20,6 +20,10 @@ class CurrentUser:
     def is_admin(self) -> bool:
         return self.role == "admin"
 
+    @property
+    def is_beta(self) -> bool:
+        return self.role == "beta"
+
 
 class UserRecord(Base, TimestampMixin):
     """Persistent user record — created on first login."""
