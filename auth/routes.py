@@ -222,16 +222,61 @@ async def _is_waitlist_approved(email: str) -> bool:
 
 
 async def _check_invite(email: str) -> None:
-    """Raise 403 if invite-only mode and email not in allowed list or waitlist."""
+    """Allow if whitelisted/waitlist-approved; otherwise auto-add to waitlist as pending,
+    notify the admin (Approve/Deny email), and raise a friendly 403 the FE can display.
+
+    Replaces the prior silent-block 403 — every signup attempt is now visible to the admin.
+    """
     allowed = _get_allowed_emails()
     if not allowed:
         return
     if email in allowed:
         return
-    # Check if email was approved via waitlist
     if await _is_waitlist_approved(email):
         return
-    raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
+
+    await _enqueue_access_request(email)
+    raise HTTPException(
+        status_code=403,
+        detail="We received your access request — you'll get an email once approved.",
+    )
+
+
+async def _enqueue_access_request(email: str) -> None:
+    """Insert a pending waitlist row (idempotent) and fire the admin Approve/Deny email.
+
+    Best-effort: a failure here must not bubble up — we still want the user to see the
+    friendly 'request received' message even if the notification path is broken.
+    """
+    position = 0
+    try:
+        from core.database.session import get_session
+        from sqlalchemy import text
+        async with get_session() as session:
+            row = await session.execute(
+                text("SELECT status FROM waitlist WHERE email = :email"),
+                {"email": email},
+            )
+            existing = row.fetchone()
+            if existing is None:
+                await session.execute(
+                    text(
+                        "INSERT INTO waitlist (email, status, source, created_at, updated_at) "
+                        "VALUES (:email, 'pending', 'signup_form', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {"email": email},
+                )
+            count_row = await session.execute(text("SELECT COUNT(*) FROM waitlist"))
+            position = (count_row.scalar() or 1)
+    except Exception as exc:
+        logger.error("[invite] waitlist insert failed for %s: %s", email, exc)
+        return
+
+    try:
+        from api.waitlist import _email_admin_waitlist
+        await _email_admin_waitlist(email, position)
+    except Exception as exc:
+        logger.error("[invite] admin notify failed for %s: %s", email, exc)
 
 
 # ── Endpoints ──────────────────────────────────────────────────────
