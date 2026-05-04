@@ -22,9 +22,14 @@ def _get_from_address() -> str:
     return os.environ.get("EMAIL_FROM", "ZugaApp <noreply@zugabot.ai>")
 
 
-_BRAND_LOGO_URL = "https://zugatechnologies.com/zuga-technologies-logo-400.png"
-_BRAND_ACCENT = "#06b6d4"        # bible §2.4 / §4.2 cyan-500 — master Zuga accent
-_BRAND_ACCENT_DIM = "#0e7490"    # bible §4.2 cyan-700 — fallback link / hover
+_BRAND_LOGO_URL = "https://zugabot.ai/zugabot-mark.svg"
+_BRAND_LOGO_W = 41   # native viewBox 301:290 → at height 40, width 41 keeps proportions
+_BRAND_LOGO_H = 40
+# Brand accent: zugabot.ai product shell uses lime-400, NOT the bible's cyan
+# (bible doc is stale; ZugaCore theme-vars.css is the deployed source of truth —
+# verified WCAG 13.13:1 on surface-0). Foreground on lime MUST be dark.
+_BRAND_ACCENT = "#a3e635"        # lime-400 — product-shell acid green (ZugaCore theme-vars.css)
+_BRAND_ACCENT_DIM = "#84cc16"    # lime-500 — fallback link / hover
 _FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 
 
@@ -36,8 +41,8 @@ def _render_header() -> str:
               <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
                 <tr>
                   <td valign="middle" style="padding-right:12px;">
-                    <img src="{_BRAND_LOGO_URL}" width="40" height="40" alt="Zuga"
-                         style="display:block;border-radius:9px;border:0;">
+                    <img src="{_BRAND_LOGO_URL}" width="{_BRAND_LOGO_W}" height="{_BRAND_LOGO_H}" alt="Zuga"
+                         style="display:block;border:0;">
                   </td>
                   <td valign="middle" style="font-family:{_FONT_STACK};font-size:18px;font-weight:700;letter-spacing:0.05em;color:{_BRAND_ACCENT};">
                     ZUGA
