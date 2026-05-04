@@ -60,6 +60,33 @@
 }
 
 /* ═══════════════════════════════════════════════
+   PRESET: ZugaLife studio (acid-green / product-shell lime)
+   Operator decision (2026-05-03): ZugaLife inherits the ZugaApp product-shell
+   acid-lime accent rather than the Bible's wellness-family mint (§5.10 acc03).
+   Reality > spec — ZugaLife sits inside zugabot.ai which is on lime, and the
+   canonical zugabot-mark-product.svg ships with lime-400 fills.
+   Reference: lime-400 #a3e635, dim: lime-500 #84cc16, bright: lime-300 #bef264.
+   Verified WCAG (lime-400 on surface-0): 13.13:1 (AAA).
+   Foreground on lime MUST be dark (#0a0a0a). White-on-lime = 1.51:1 = AAA fail.
+   ═══════════════════════════════════════════════ */
+[data-theme="life"] {
+  /* Surfaces unchanged — keep ZugaCore dark scale until full Bible token migration. */
+
+  --accent: 163 230 53;          /* lime-400 #a3e635 */
+  --accent-dim: 132 204 22;      /* lime-500 #84cc16 */
+  --accent-bright: 190 242 100;  /* lime-300 #bef264 */
+
+  /* accent-alt stays violet (used for prestige/quest semantic, not brand). */
+
+  /* XP follows brand accent. */
+  --color-xp: 163 230 53;        /* lime-400 */
+
+  /* Glow tint matches studio acid-lime. */
+  --glow-color: rgba(163, 230, 53, 0.2);
+  --glow-color-wide: rgba(163, 230, 53, 0.08);
+}
+
+/* ═══════════════════════════════════════════════
    PRESET: Tarot / Mystical
    ═══════════════════════════════════════════════ */
 [data-theme="tarot"] {
