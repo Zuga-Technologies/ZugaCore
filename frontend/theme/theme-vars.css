@@ -78,18 +78,15 @@
 html[data-theme="life"] {
   /* Surfaces unchanged — keep ZugaCore dark scale until full Bible token migration. */
 
-  /* ZugaCore RGB-triple tokens (Tailwind opacity-syntax via rgb(var(--accent)/X)) */
+  /* ONLY override ZugaCore's --accent (RGB-triple). This is what Tailwind's
+     bg-accent / text-accent classes inside Life consume. Do NOT bridge into
+     ZugaApp's --accent-brand* tokens — those are SHELL brand tokens that
+     drive auth forms, ChatPanel, focus outlines, etc. and must stay lime
+     regardless of which studio is active. "JUST FOR LIFE" means: coral
+     appears INSIDE the Life dashboard surface only, never in shell chrome. */
   --accent: 251 113 133;         /* rose-400 #fb7185 */
   --accent-dim: 225 29 72;       /* rose-600 #e11d48 — darker companion */
   --accent-bright: 253 164 175;  /* rose-300 #fda4af */
-
-  /* ZugaApp brand-system tokens (hex format, used by shell components like ChatPanel
-     that pre-date Tailwind opacity-syntax migration). Coral propagates through the
-     shell whenever Life is the active studio. Each studio with its own data-theme
-     should override these to drive its own button/border/text color in the shell. */
-  --accent-brand: #fb7185;        /* rose-400 — primary brand */
-  --accent-brand-strong: #e11d48; /* rose-600 — pressed/strong + darker companion */
-  --accent-brand-bright: #fda4af; /* rose-300 — hover/bright */
 
   /* accent-alt stays violet (used for prestige/quest semantic, not brand). */
 
