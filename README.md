@@ -1,6 +1,6 @@
 # ZugaCore
 
-Shared foundation layer for the [Zuga](https://github.com/Zuga-Technologies) studio ecosystem. Provides authentication, database management, a credit/token system, a Tailwind theme, and plugin interfaces used by all Zuga studios.
+Shared foundation layer for the [Zuga](https://github.com/Zuga-Technologies) studio ecosystem — software for the agent era. Provides authentication, database management, a credit/token system, a Tailwind theme, and plugin interfaces used by all Zuga studios. New studios inherit the whole stack on day one.
 
 Main site for business communications: [ZugaTechnologies](https://zugatechnologies.com/)
 
