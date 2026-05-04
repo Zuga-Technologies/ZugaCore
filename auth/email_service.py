@@ -22,9 +22,80 @@ def _get_from_address() -> str:
     return os.environ.get("EMAIL_FROM", "ZugaApp <noreply@zugabot.ai>")
 
 
-def _email_template(title: str, body: str, button_text: str, button_link: str, footer: str) -> str:
-    """Render a branded ZugaApp email with dark theme + amber accent."""
+_BRAND_LOGO_URL = "https://zugatechnologies.com/zuga-technologies-logo-400.png"
+_BRAND_ACCENT = "#06b6d4"        # bible §2.4 / §4.2 cyan-500 — master Zuga accent
+_BRAND_ACCENT_DIM = "#0e7490"    # bible §4.2 cyan-700 — fallback link / hover
+_FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+
+
+def _render_header() -> str:
+    """Bible §2.2/§2.3 — master Z mark + ZUGA wordmark in cyan, on master dark surface."""
+    return f"""\
+          <tr>
+            <td align="center" style="padding-bottom:32px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+                <tr>
+                  <td valign="middle" style="padding-right:12px;">
+                    <img src="{_BRAND_LOGO_URL}" width="40" height="40" alt="Zuga"
+                         style="display:block;border-radius:9px;border:0;">
+                  </td>
+                  <td valign="middle" style="font-family:{_FONT_STACK};font-size:18px;font-weight:700;letter-spacing:0.05em;color:{_BRAND_ACCENT};">
+                    ZUGA
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>"""
+
+
+def _render_footer() -> str:
+    """Bible-aligned footer — corp landing pattern (copyright + nav)."""
+    return f"""\
+          <tr>
+            <td align="center" style="padding-top:28px;font-family:{_FONT_STACK};">
+              <p style="margin:0 0 8px;font-size:12px;line-height:1.5;color:#525252;">
+                &copy; 2026 Zuga Technologies LLC
+              </p>
+              <p style="margin:0;font-size:12px;line-height:1.5;color:#525252;">
+                <a href="https://zugatechnologies.com" style="color:#737373;text-decoration:none;">zugatechnologies.com</a>
+                &nbsp;·&nbsp;
+                <a href="https://zugabot.ai" style="color:#737373;text-decoration:none;">zugabot.ai</a>
+                &nbsp;·&nbsp;
+                <a href="mailto:buga@zugabot.ai" style="color:#737373;text-decoration:none;">buga@zugabot.ai</a>
+              </p>
+            </td>
+          </tr>"""
+
+
+def _email_template(
+    title: str,
+    body: str,
+    button_text: str,
+    button_link: str,
+    footer: str,
+    secondary_button_text: str | None = None,
+    secondary_button_link: str | None = None,
+) -> str:
+    """Render a branded Zuga email — bible-aligned (cyan master accent, dark surface).
+
+    Optional secondary button renders below the primary as a ghost-style outline
+    button (used by the admin Approve/Deny notification).
+    """
     safe_link = html_lib.escape(button_link)
+
+    secondary_block = ""
+    if secondary_button_text and secondary_button_link:
+        safe_sec_link = html_lib.escape(secondary_button_link)
+        secondary_block = f"""
+                <tr>
+                  <td align="center" style="padding-top:10px;">
+                    <a href="{safe_sec_link}"
+                       style="display:inline-block;padding:12px 36px;background-color:transparent;color:#a3a3a3;font-size:14px;font-weight:500;text-decoration:none;border:1px solid #333;border-radius:8px;">
+                      {html_lib.escape(secondary_button_text)}
+                    </a>
+                  </td>
+                </tr>"""
+
     return f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -33,74 +104,46 @@ def _email_template(title: str, body: str, button_text: str, button_link: str, f
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{html_lib.escape(title)}</title>
 </head>
-<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:{_FONT_STACK};">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;">
     <tr>
       <td align="center" style="padding:40px 20px;">
         <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px;width:100%;">
-
-          <!-- Logo -->
-          <tr>
-            <td align="center" style="padding-bottom:32px;">
-              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
-                <tr>
-                  <td style="width:48px;height:48px;border-radius:12px;background-color:#2a1d08;text-align:center;vertical-align:middle;line-height:48px;font-size:22px;font-weight:700;color:#f59e0b;">
-                    Z
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- Card -->
+{_render_header()}
           <tr>
             <td style="background-color:#111111;border:1px solid #262626;border-radius:16px;padding:40px 36px;">
 
-              <!-- Title -->
               <h1 style="margin:0 0 8px;font-size:22px;font-weight:600;color:#f5f5f5;text-align:center;">
                 {html_lib.escape(title)}
               </h1>
 
-              <!-- Body -->
               <p style="margin:0 0 28px;font-size:15px;line-height:1.6;color:#a3a3a3;text-align:center;">
                 {body}
               </p>
 
-              <!-- Button -->
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                 <tr>
                   <td align="center">
                     <a href="{safe_link}"
-                       style="display:inline-block;padding:12px 32px;background-color:#f59e0b;color:#0a0a0a;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">
+                       style="display:inline-block;padding:12px 32px;background-color:{_BRAND_ACCENT};color:#0a0a0a;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">
                       {html_lib.escape(button_text)}
                     </a>
                   </td>
-                </tr>
+                </tr>{secondary_block}
               </table>
 
-              <!-- Expire notice -->
               <p style="margin:24px 0 0;font-size:13px;color:#525252;text-align:center;">
                 {html_lib.escape(footer)}
               </p>
 
-              <!-- Fallback link -->
               <p style="margin:16px 0 0;font-size:12px;color:#525252;text-align:center;word-break:break-all;">
                 If the button doesn't work, copy this link:<br>
-                <a href="{safe_link}" style="color:#b45309;text-decoration:underline;">{safe_link}</a>
+                <a href="{safe_link}" style="color:{_BRAND_ACCENT_DIM};text-decoration:underline;">{safe_link}</a>
               </p>
 
             </td>
           </tr>
-
-          <!-- Footer -->
-          <tr>
-            <td align="center" style="padding-top:24px;">
-              <p style="margin:0;font-size:12px;color:#525252;">
-                zugabot.ai
-              </p>
-            </td>
-          </tr>
-
+{_render_footer()}
         </table>
       </td>
     </tr>
