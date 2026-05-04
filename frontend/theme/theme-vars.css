@@ -60,30 +60,36 @@
 }
 
 /* ═══════════════════════════════════════════════
-   PRESET: ZugaLife studio (acid-green / product-shell lime)
-   Operator decision (2026-05-03): ZugaLife inherits the ZugaApp product-shell
-   acid-lime accent rather than the Bible's wellness-family mint (§5.10 acc03).
-   Reality > spec — ZugaLife sits inside zugabot.ai which is on lime, and the
-   canonical zugabot-mark-product.svg ships with lime-400 fills.
-   Reference: lime-400 #a3e635, dim: lime-500 #84cc16, bright: lime-300 #bef264.
-   Verified WCAG (lime-400 on surface-0): 13.13:1 (AAA).
-   Foreground on lime MUST be dark (#0a0a0a). White-on-lime = 1.51:1 = AAA fail.
+   PRESET: ZugaLife studio (rose coral / holistic-zen)
+   Operator decision (2026-05-04): ZugaLife differentiates from the ZugaApp
+   product-shell acid-lime brand and adopts rose coral as its own studio
+   accent — "holistic, natural, zen." Supersedes the prior 2026-05-03 lime
+   inheritance and the original Bible §5.10 acc03 mint assignment.
+   Reference: rose-400 #fb7185, dim/companion: rose-600 #e11d48,
+              bright: rose-300 #fda4af.
+   Verified WCAG: rose-400 on surface-0 = 7.36:1 (AAA normal text).
+   Foreground on rose-400 MUST be dark (#0a0a0a). White-on-rose-400 = 2.69:1
+   = AA fail — never use white text on the coral itself.
+   The darker companion rose-600 accepts white text at 4.70:1 (AA) and is
+   the safe choice for any UI surface where coral fails contrast.
+   Acid lime #a3e635 remains the ZugaApp product-shell brand — do NOT
+   propagate coral outside the [data-theme="life"] scope.
    ═══════════════════════════════════════════════ */
 [data-theme="life"] {
   /* Surfaces unchanged — keep ZugaCore dark scale until full Bible token migration. */
 
-  --accent: 163 230 53;          /* lime-400 #a3e635 */
-  --accent-dim: 132 204 22;      /* lime-500 #84cc16 */
-  --accent-bright: 190 242 100;  /* lime-300 #bef264 */
+  --accent: 251 113 133;         /* rose-400 #fb7185 */
+  --accent-dim: 225 29 72;       /* rose-600 #e11d48 — darker companion */
+  --accent-bright: 253 164 175;  /* rose-300 #fda4af */
 
   /* accent-alt stays violet (used for prestige/quest semantic, not brand). */
 
   /* XP follows brand accent. */
-  --color-xp: 163 230 53;        /* lime-400 */
+  --color-xp: 251 113 133;       /* rose-400 */
 
-  /* Glow tint matches studio acid-lime. */
-  --glow-color: rgba(163, 230, 53, 0.2);
-  --glow-color-wide: rgba(163, 230, 53, 0.08);
+  /* Glow tint matches studio rose coral. */
+  --glow-color: rgba(251, 113, 133, 0.2);
+  --glow-color-wide: rgba(251, 113, 133, 0.08);
 }
 
 /* ═══════════════════════════════════════════════
