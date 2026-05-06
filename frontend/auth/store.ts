@@ -250,9 +250,17 @@ export const useAuthStore = defineStore('auth', () => {
     loading.value = true
     try {
       user.value = await api.get<User>('/api/auth/me')
-    } catch {
-      clearSession()
-      user.value = null
+    } catch (e) {
+      // Only invalidate the session on a real 401 (auth genuinely dead).
+      // Network errors, 5xx, CORS hiccups, and SuperTokens-core cold-boots
+      // used to nuke the session here — that's why returning to the tab
+      // after a brief connectivity blip kicked Buga to the landing page.
+      // The api client has already cleared session + dispatched
+      // 'zugaapp:session-expired' for true 401s, so we just sync user.
+      if (e instanceof ApiError && e.status === 401) {
+        user.value = null
+      }
+      // else: leave existing user state untouched until next attempt
     } finally {
       loading.value = false
     }

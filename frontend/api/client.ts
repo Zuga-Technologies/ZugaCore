@@ -114,11 +114,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       token = newToken
       res = await rawFetch(method, path, body, token)
     }
-    // Still 401 after refresh? Session is genuinely dead — clear and redirect.
+    // Still 401 after refresh? Session is genuinely dead — clear it and
+    // dispatch a session-expired event. We deliberately do NOT force a
+    // window.location redirect: a hard nav to /login bumped users to the
+    // landing page on transient SuperTokens-core blips, even when their
+    // refresh token was still valid. The router's beforeEach will redirect
+    // on the next navigation; App.vue listens for the event for proactive
+    // routing if the current view is private.
     if (res.status === 401) {
       clearSession()
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login'
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('zugaapp:session-expired'))
       }
     }
   }
