@@ -153,13 +153,6 @@ def init_supertokens() -> None:
         provider_names or "(none configured)",
     )
 
-    # Access/refresh token validity is configured on the SuperTokens *core*
-    # service (not the SDK). To bump the access-token TTL above the 1-hour
-    # default and reduce the chance of users getting bumped to the landing
-    # page on tab re-focus, set on the SuperTokens core service env:
-    #   ACCESS_TOKEN_VALIDITY=86400        # 24h, default 3600
-    #   REFRESH_TOKEN_VALIDITY=144000      # 100d, default 86400 (60d)
-    # See: https://supertokens.com/docs/session/common-customizations/sessions/change-session-timeout
     recipe_list = [
         emailpassword.init(),
         session.init(
