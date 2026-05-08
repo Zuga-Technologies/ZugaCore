@@ -11,6 +11,7 @@ Handles:
     payment_intent.payment_failed → Flag past_due status
 """
 
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -77,7 +78,7 @@ async def handle_stripe_webhook(request: Request) -> dict:
     sig_header = request.headers.get("stripe-signature", "")
 
     try:
-        event = stripe.Webhook.construct_event(
+        stripe.Webhook.construct_event(
             payload, sig_header, _get_webhook_secret()
         )
     except ValueError:
@@ -87,10 +88,14 @@ async def handle_stripe_webhook(request: Request) -> dict:
         logger.error("Invalid webhook signature")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
+    # Parse payload as a plain dict — newer stripe SDK Event/StripeObject types
+    # don't inherit from dict, so .get() raises AttributeError. Working off the
+    # raw JSON keeps every downstream handler using normal dict semantics.
+    event = json.loads(payload)
     event_type = event["type"]
     data = event["data"]["object"]
 
-    logger.info("Stripe webhook received: %s (id: %s)", event_type, event["id"])
+    logger.info("Stripe webhook received: %s (id: %s)", event_type, event.get("id"))
 
     handler = _EVENT_HANDLERS.get(event_type)
     if handler:
@@ -378,7 +383,7 @@ async def _handle_payment_failed(payment_intent: dict) -> dict:
     _init_stripe()
     try:
         invoice = stripe.Invoice.retrieve(invoice_id)
-        stripe_sub_id = invoice.get("subscription")
+        stripe_sub_id = getattr(invoice, "subscription", None)
     except Exception as e:
         logger.warning("Could not fetch invoice for failed payment: %s", e)
         return {"status": "error", "reason": "stripe_api_error"}
