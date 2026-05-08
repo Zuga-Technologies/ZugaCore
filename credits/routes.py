@@ -192,8 +192,8 @@ async def purchase_topup(
             user_id=user.id,
             email=user.email,
             pack=body.pack,
-            success_url=f"{base}/tokens?purchase=success",
-            cancel_url=f"{base}/tokens?purchase=cancelled",
+            success_url=f"{base}/purchase/success",
+            cancel_url=f"{base}/purchase/cancelled",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -218,8 +218,8 @@ async def subscribe_tier(
             user_id=user.id,
             email=user.email,
             tier=body.tier,
-            success_url=f"{base}/tokens?purchase=success",
-            cancel_url=f"{base}/tokens?purchase=cancelled",
+            success_url=f"{base}/purchase/success",
+            cancel_url=f"{base}/purchase/cancelled",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
