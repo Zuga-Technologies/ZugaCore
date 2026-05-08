@@ -1,0 +1,184 @@
+"""Tests for the Stripe webhook handler — signed-payload → token grant pipeline.
+
+Catches SDK-shape regressions (e.g. Event/StripeObject no longer inheriting
+from dict, breaking every .get() in the handlers) by synthesizing a real
+HMAC-signed checkout.session.completed payload and asserting tokens credit
+through the same path Stripe traffic uses.
+
+Run from ZugaApp/backend/:
+    cd E:/Programming/ZugaApp/backend && python -m pytest \
+        ../../ZugaCore/credits/test_webhooks.py -v
+"""
+
+import asyncio
+import hashlib
+import hmac
+import json
+import time
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from core.credits.routes import router
+
+
+_WEBHOOK_SECRET = "whsec_test_abc123"
+_USER_ID = "u1"  # seeded by conftest
+
+
+def _sign_stripe_payload(payload: str, secret: str) -> str:
+    """Build a Stripe-format signature header.
+
+    Mirrors stripe.WebhookSignature.verify_header:
+        signed_payload = f"{timestamp}.{payload}"
+        sig = hmac_sha256_hex(secret, signed_payload)
+        header = f"t={timestamp},v1={sig}"
+    """
+    timestamp = str(int(time.time()))
+    signed = f"{timestamp}.{payload}".encode()
+    sig = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return f"t={timestamp},v1={sig}"
+
+
+def _topup_event(
+    user_id: str = _USER_ID,
+    pack: str = "starter",
+    payment_intent: str = "pi_test_001",
+    event_id: str = "evt_test_001",
+) -> dict:
+    """Minimal checkout.session.completed event for a top-up purchase."""
+    return {
+        "id": event_id,
+        "object": "event",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_001",
+                "object": "checkout.session",
+                "payment_intent": payment_intent,
+                "metadata": {
+                    "user_id": user_id,
+                    "type": "topup",
+                    "pack": pack,
+                },
+            }
+        },
+    }
+
+
+@pytest.fixture
+def client(session, monkeypatch):
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _WEBHOOK_SECRET)
+
+    app = FastAPI()
+    app.include_router(router)
+
+    with TestClient(app, raise_server_exceptions=True) as c:
+        yield c
+
+
+def _balance(user_id: str) -> dict:
+    """Helper — read balance synchronously inside a test."""
+    from core.credits.manager import get_balance
+    return asyncio.get_event_loop().run_until_complete(get_balance(user_id))
+
+
+# ── Happy path ───────────────────────────────────────────────────────────
+
+
+def test_topup_webhook_credits_tokens(client):
+    """Synthetic checkout.session.completed → handler returns 200 + credit applied.
+
+    This is the regression test for the SDK-shape bug — any .get() crashing on
+    a Stripe StripeObject would surface here as a 500 instead of 200.
+    """
+    payload = json.dumps(_topup_event(pack="starter"))
+    sig = _sign_stripe_payload(payload, _WEBHOOK_SECRET)
+
+    resp = client.post(
+        "/api/webhooks/stripe",
+        content=payload,
+        headers={"stripe-signature": sig, "content-type": "application/json"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "topup_credited"
+    assert body["pack"] == "starter"
+    assert body["tokens"] == 200  # TOPUP_PACKS["starter"] = 200 tokens
+
+    bal = _balance(_USER_ID)
+    assert bal["purchased"] >= 200
+
+
+def test_topup_webhook_idempotent_on_retry(client):
+    """Re-delivering the same event credits once, not twice."""
+    event = _topup_event(pack="starter", payment_intent="pi_idempotent_test")
+    payload = json.dumps(event)
+    headers = {
+        "stripe-signature": _sign_stripe_payload(payload, _WEBHOOK_SECRET),
+        "content-type": "application/json",
+    }
+
+    r1 = client.post("/api/webhooks/stripe", content=payload, headers=headers)
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "topup_credited"
+    bal_after_first = _balance(_USER_ID)["purchased"]
+
+    headers2 = {
+        "stripe-signature": _sign_stripe_payload(payload, _WEBHOOK_SECRET),
+        "content-type": "application/json",
+    }
+    r2 = client.post("/api/webhooks/stripe", content=payload, headers=headers2)
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "already_processed"
+
+    bal_after_second = _balance(_USER_ID)["purchased"]
+    assert bal_after_first == bal_after_second, "idempotency guard failed — double credit"
+
+
+# ── Negative paths ───────────────────────────────────────────────────────
+
+
+def test_invalid_signature_rejected(client):
+    """Malformed sig header → 400, no token grant."""
+    payload = json.dumps(_topup_event())
+    resp = client.post(
+        "/api/webhooks/stripe",
+        content=payload,
+        headers={
+            "stripe-signature": "t=1234,v1=deadbeef",
+            "content-type": "application/json",
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_topup_unknown_pack_returns_error(client):
+    """A signed event with an unknown pack name returns error, no credit."""
+    payload = json.dumps(_topup_event(pack="bogus_pack"))
+    sig = _sign_stripe_payload(payload, _WEBHOOK_SECRET)
+
+    resp = client.post(
+        "/api/webhooks/stripe",
+        content=payload,
+        headers={"stripe-signature": sig, "content-type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "error"
+
+
+def test_topup_missing_user_id_returns_error(client):
+    """Metadata without user_id → error, no credit."""
+    event = _topup_event()
+    event["data"]["object"]["metadata"].pop("user_id")
+    payload = json.dumps(event)
+    sig = _sign_stripe_payload(payload, _WEBHOOK_SECRET)
+
+    resp = client.post(
+        "/api/webhooks/stripe",
+        content=payload,
+        headers={"stripe-signature": sig, "content-type": "application/json"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "error"
