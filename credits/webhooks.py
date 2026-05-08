@@ -90,7 +90,7 @@ async def handle_stripe_webhook(request: Request) -> dict:
     event_type = event["type"]
     data = event["data"]["object"]
 
-    logger.info("Stripe webhook received: %s (id: %s)", event_type, event.get("id"))
+    logger.info("Stripe webhook received: %s (id: %s)", event_type, event["id"])
 
     handler = _EVENT_HANDLERS.get(event_type)
     if handler:
