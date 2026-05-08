@@ -20,7 +20,12 @@ import stripe
 from fastapi import HTTPException, Request
 from sqlalchemy import select
 
-from core.credits.manager import add_purchased_tokens, add_subscription_tokens, grant_tokens
+from core.credits.manager import (
+    add_purchased_tokens,
+    add_subscription_tokens,
+    claw_back_purchased_tokens,
+    grant_tokens,
+)
 from core.credits.models import Subscription, TokenTransaction
 from core.credits.stripe_service import (
     SUBSCRIPTION_TIERS,
@@ -404,6 +409,96 @@ async def _handle_payment_failed(payment_intent: dict) -> dict:
     return {"status": "ignored", "reason": "subscription not found"}
 
 
+async def _claw_back_for_charge(charge: dict, refund_fraction: float, idempotency_id: str, reason: str) -> dict:
+    """Find the original top-up purchase by payment_intent and deduct
+    `refund_fraction` of the originally-credited tokens. Shared between
+    refund and dispute handlers."""
+    payment_intent = charge.get("payment_intent")
+    if not payment_intent:
+        return {"status": "ignored", "reason": "no payment_intent on charge"}
+
+    if await _already_processed(idempotency_id, "refund"):
+        logger.info("Duplicate %s webhook skipped: %s", reason, idempotency_id)
+        return {"status": "already_processed"}
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(TokenTransaction).where(
+                TokenTransaction.stripe_id == payment_intent,
+                TokenTransaction.type == "purchase",
+            ).limit(1)
+        )
+        original = result.scalar_one_or_none()
+
+    if not original:
+        # Subscription refunds use invoice IDs, not payment_intent IDs — those
+        # currently fall through to admin-grant. Top-up refunds always have a
+        # matching purchase row.
+        logger.warning("%s for unknown payment_intent: %s", reason, payment_intent)
+        return {"status": "ignored", "reason": "original purchase not found"}
+
+    tokens_to_claw_back = original.amount * refund_fraction
+    if tokens_to_claw_back <= 0:
+        return {"status": "ignored", "reason": "zero tokens to claw back"}
+
+    result = await claw_back_purchased_tokens(
+        user_id=original.user_id,
+        tokens=tokens_to_claw_back,
+        stripe_id=idempotency_id,
+        reason=reason,
+    )
+    return {
+        "status": reason,
+        "user_id": original.user_id,
+        "tokens_clawed_back": result["tokens_clawed_back"],
+    }
+
+
+async def _handle_charge_refunded(charge: dict) -> dict:
+    """Handle charge.refunded — deduct tokens proportional to refund amount.
+
+    Stripe fires this for partial AND full refunds. We compute the refund
+    fraction from amount_refunded/amount and deduct that share of the
+    originally-credited tokens. Floors at zero in the manager — already-spent
+    tokens aren't recovered (standard digital-goods policy).
+    """
+    amount = charge.get("amount", 0) or 0
+    amount_refunded = charge.get("amount_refunded", 0) or 0
+    if amount <= 0 or amount_refunded <= 0:
+        return {"status": "ignored", "reason": "no refund amount"}
+
+    refund_fraction = amount_refunded / amount
+
+    # Each refund object has a unique id — use it for idempotency. Fall back
+    # to a derived key if the refunds list is missing (very old API versions).
+    refunds_list = (charge.get("refunds") or {}).get("data", [])
+    refund_id = refunds_list[0]["id"] if refunds_list else f"refund_{charge.get('id', 'unknown')}"
+
+    return await _claw_back_for_charge(charge, refund_fraction, refund_id, reason="refund")
+
+
+async def _handle_charge_dispute_created(dispute: dict) -> dict:
+    """Handle charge.dispute.created — deduct tokens on chargeback.
+
+    A dispute creation locks the funds at Stripe; we treat it as a 100% claw-back
+    immediately. If the dispute is later won the merchant can manually re-grant
+    via the admin endpoint (rare for digital goods).
+    """
+    charge_id = dispute.get("charge")
+    dispute_id = dispute.get("id")
+    if not charge_id or not dispute_id:
+        return {"status": "ignored", "reason": "missing charge or dispute id"}
+
+    _init_stripe()
+    try:
+        charge = stripe.Charge.retrieve(charge_id).to_dict_recursive()
+    except Exception as e:
+        logger.warning("Could not fetch charge for dispute %s: %s", dispute_id, e)
+        return {"status": "error", "reason": "stripe_api_error"}
+
+    return await _claw_back_for_charge(charge, refund_fraction=1.0, idempotency_id=dispute_id, reason="dispute")
+
+
 # ── Event Router ─────────────────────────────────────────────────────
 
 _EVENT_HANDLERS = {
@@ -412,4 +507,6 @@ _EVENT_HANDLERS = {
     "customer.subscription.updated": _handle_subscription_updated,
     "customer.subscription.deleted": _handle_subscription_deleted,
     "payment_intent.payment_failed": _handle_payment_failed,
+    "charge.refunded": _handle_charge_refunded,
+    "charge.dispute.created": _handle_charge_dispute_created,
 }

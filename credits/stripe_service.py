@@ -36,6 +36,25 @@ def _init_stripe() -> None:
     stripe.api_key = _get_stripe_key()
 
 
+def _tax_kwargs() -> dict:
+    """Return checkout-session kwargs that enable Stripe Tax when configured.
+
+    Set STRIPE_TAX_ENABLED=true to opt in. Stripe Tax must also be activated
+    in the Dashboard (Settings → Tax) AND an origin address registered;
+    otherwise checkout creation fails. Off by default so the code ships
+    safely before Dashboard config.
+    """
+    if os.environ.get("STRIPE_TAX_ENABLED", "").strip().lower() != "true":
+        return {}
+    return {
+        "automatic_tax": {"enabled": True},
+        # Required when an existing Customer is passed AND automatic_tax is on
+        # — Stripe writes the address it collects during checkout back to the
+        # customer record so tax can be calculated on future renewals.
+        "customer_update": {"address": "auto"},
+    }
+
+
 # ── Product/Price Mappings ───────────────────────────────────────────
 
 # Subscription tiers → Stripe Price IDs (set in env after creating in Stripe Dashboard)
@@ -215,6 +234,7 @@ async def create_checkout_subscription(
                 "tokens_per_cycle": str(tier_info["tokens"]),
             },
         },
+        **_tax_kwargs(),
     )
 
     logger.info("Created subscription checkout for user %s tier %s", user_id, tier)
@@ -249,6 +269,7 @@ async def create_checkout_topup(
             "pack": pack,
             "tokens": str(pack_info["tokens"]),
         },
+        **_tax_kwargs(),
     )
 
     logger.info("Created top-up checkout for user %s pack %s", user_id, pack)

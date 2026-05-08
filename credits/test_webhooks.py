@@ -182,3 +182,137 @@ def test_topup_missing_user_id_returns_error(client):
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "error"
+
+
+# ── Refund / dispute helpers ─────────────────────────────────────────────
+
+
+def _post(client, event: dict) -> dict:
+    """POST a signed event to the webhook handler. Returns parsed JSON body."""
+    payload = json.dumps(event)
+    sig = _sign_stripe_payload(payload, _WEBHOOK_SECRET)
+    resp = client.post(
+        "/api/webhooks/stripe",
+        content=payload,
+        headers={"stripe-signature": sig, "content-type": "application/json"},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _refund_event(
+    payment_intent: str,
+    amount: int = 200,
+    amount_refunded: int = 200,
+    refund_id: str = "re_test_001",
+    event_id: str = "evt_refund_001",
+) -> dict:
+    return {
+        "id": event_id,
+        "object": "event",
+        "type": "charge.refunded",
+        "data": {
+            "object": {
+                "id": "ch_test_001",
+                "object": "charge",
+                "payment_intent": payment_intent,
+                "amount": amount,
+                "amount_refunded": amount_refunded,
+                "refunds": {"object": "list", "data": [{"id": refund_id, "amount": amount_refunded}]},
+            }
+        },
+    }
+
+
+# ── Refund happy paths ────────────────────────────────────────────────────
+
+
+def test_full_refund_claws_back_all_tokens(client):
+    """Refund of 100% of charge → all credited tokens deducted."""
+    pi = "pi_refund_full"
+    _post(client, _topup_event(pack="starter", payment_intent=pi))
+    bal_before = _balance(_USER_ID)["purchased"]
+    assert bal_before >= 200
+
+    body = _post(client, _refund_event(pi, amount=200, amount_refunded=200))
+    assert body["status"] == "refund"
+    assert body["tokens_clawed_back"] == 200
+
+    bal_after = _balance(_USER_ID)["purchased"]
+    assert bal_after == bal_before - 200
+
+
+def test_partial_refund_claws_back_proportional(client):
+    """Refund of 50% of charge → half the credited tokens deducted."""
+    pi = "pi_refund_partial"
+    _post(client, _topup_event(pack="starter", payment_intent=pi))
+    bal_before = _balance(_USER_ID)["purchased"]
+
+    body = _post(client, _refund_event(pi, amount=200, amount_refunded=100))
+    assert body["status"] == "refund"
+    assert body["tokens_clawed_back"] == 100
+
+    bal_after = _balance(_USER_ID)["purchased"]
+    assert bal_after == bal_before - 100
+
+
+def test_refund_idempotent_on_retry(client):
+    """Re-delivering the same refund event deducts once, not twice."""
+    pi = "pi_refund_idem"
+    _post(client, _topup_event(pack="starter", payment_intent=pi))
+
+    body1 = _post(client, _refund_event(pi, refund_id="re_idem_001"))
+    assert body1["status"] == "refund"
+    bal_after_first = _balance(_USER_ID)["purchased"]
+
+    body2 = _post(client, _refund_event(pi, refund_id="re_idem_001"))
+    assert body2["status"] == "already_processed"
+
+    bal_after_second = _balance(_USER_ID)["purchased"]
+    assert bal_after_first == bal_after_second
+
+
+def test_refund_floors_at_zero_when_already_spent(client):
+    """If tokens were spent before refund, deduction floors at 0 — no negative balance."""
+    from core.credits.manager import claw_back_purchased_tokens
+    # Simulate prior spend by drawing the bucket below the refund amount
+    pi = "pi_refund_floor"
+    _post(client, _topup_event(pack="starter", payment_intent=pi))
+    asyncio.get_event_loop().run_until_complete(
+        claw_back_purchased_tokens(_USER_ID, 150, stripe_id="manual_spend_simulation", reason="test_setup")
+    )
+    bal_pre_refund = _balance(_USER_ID)["purchased"]
+
+    body = _post(client, _refund_event(pi, amount=200, amount_refunded=200))
+    assert body["status"] == "refund"
+    # Only what's left can be reclaimed
+    assert body["tokens_clawed_back"] <= bal_pre_refund
+
+    bal_after = _balance(_USER_ID)["purchased"]
+    assert bal_after >= 0  # never negative
+
+
+def test_refund_for_unknown_payment_intent_is_ignored(client):
+    """Refund event for a payment we never recorded → ignored, no error."""
+    body = _post(client, _refund_event(payment_intent="pi_never_seen"))
+    assert body["status"] == "ignored"
+
+
+# ── Past-due (subscription payment failed) ────────────────────────────────
+
+
+def test_payment_failed_event_with_no_invoice_is_ignored(client):
+    """payment_intent.payment_failed without an invoice → ignored gracefully.
+
+    Verifies the SDK-shape fix from today (getattr instead of .get on the
+    StripeObject returned by stripe.Invoice.retrieve()) still allows the
+    handler to short-circuit cleanly when there's no invoice.
+    """
+    event = {
+        "id": "evt_payment_failed_001",
+        "object": "event",
+        "type": "payment_intent.payment_failed",
+        "data": {"object": {"id": "pi_failed_001", "object": "payment_intent"}},
+    }
+    body = _post(client, event)
+    assert body["status"] == "ignored"

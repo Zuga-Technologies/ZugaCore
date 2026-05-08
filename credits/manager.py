@@ -480,6 +480,47 @@ async def add_purchased_tokens(user_id: str, tokens: float, stripe_id: str | Non
     return {"tokens_added": tokens, "new_total": total}
 
 
+async def claw_back_purchased_tokens(
+    user_id: str,
+    tokens: float,
+    stripe_id: str | None = None,
+    reason: str = "stripe_refund",
+) -> dict:
+    """Deduct purchased tokens from a user's wallet on refund or dispute.
+
+    Floors at zero — already-spent tokens aren't recovered. Standard
+    digital-goods policy: vendor accepts the loss on refund-after-use rather
+    than letting balances go negative (which would block future grants).
+    """
+    if tokens <= 0:
+        raise ValueError(f"tokens must be positive, got {tokens}")
+    async with get_session() as session:
+        balance = await _get_or_create_balance(session, user_id)
+        actual = min(balance.purchased_tokens, tokens)
+        balance.purchased_tokens -= actual
+
+        total = (
+            balance.free_tokens + balance.sub_tokens
+            + balance.sub_rollover + balance.purchased_tokens
+        )
+
+        session.add(TokenTransaction(
+            user_id=user_id,
+            type="refund",
+            amount=-actual,
+            source="purchased",
+            reason=reason,
+            stripe_id=stripe_id,
+            balance_after=total,
+        ))
+
+    logger.info(
+        "Clawed back %s purchased tokens from user %s (requested=%s, stripe=%s)",
+        actual, user_id, tokens, stripe_id,
+    )
+    return {"tokens_clawed_back": actual, "new_total": total}
+
+
 async def add_subscription_tokens(user_id: str, tokens: float, stripe_id: str | None = None) -> dict:
     """Allocate subscription tokens for a billing cycle.
 
