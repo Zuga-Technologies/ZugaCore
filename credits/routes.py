@@ -151,7 +151,7 @@ async def my_usage(
 
 
 def _app_url() -> str:
-    return os.environ.get("APP_URL", "http://localhost:5173")
+    return os.environ.get("APP_BASE_URL", "https://zugabot.ai")
 
 
 class PurchaseRequest(BaseModel):
