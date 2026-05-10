@@ -1,0 +1,40 @@
+/*
+ * Zuga Delight Kit — motion tokens
+ *
+ * Single source of truth for animation timing and easing across all studios.
+ * Components in components/delight/ consume these. Studios theme via the
+ * existing --accent RGB triple in theme-vars.css.
+ *
+ * Reduced-motion respected: when the user prefers reduced motion, all
+ * durations collapse to 1ms — the visual lands but motion is suppressed.
+ */
+
+:root {
+  /* Durations — paired in 1.6x ratios */
+  --zd-dur-flicker: 120ms;
+  --zd-dur-quick:   200ms;
+  --zd-dur-base:    320ms;
+  --zd-dur-feature: 520ms;
+  --zd-dur-arrival: 840ms;
+
+  /* Easings */
+  --zd-ease-soft:      cubic-bezier(0.22, 1, 0.36, 1);     /* gentle settle */
+  --zd-ease-snappy:    cubic-bezier(0.34, 1.56, 0.64, 1);  /* light overshoot */
+  --zd-ease-celebrate: cubic-bezier(0.16, 1.3, 0.3, 1);    /* generous pop */
+  --zd-ease-linear:    linear;
+
+  /* Glow color follows the studio accent. theme-vars.css already defines
+     --glow-color per theme; we expose a celebrate variant here. */
+  --zd-glow-celebrate: rgba(var(--accent), 0.45);
+  --zd-glow-soft:      rgba(var(--accent), 0.18);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --zd-dur-flicker: 1ms;
+    --zd-dur-quick:   1ms;
+    --zd-dur-base:    1ms;
+    --zd-dur-feature: 1ms;
+    --zd-dur-arrival: 1ms;
+  }
+}
