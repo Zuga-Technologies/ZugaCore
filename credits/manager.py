@@ -21,7 +21,6 @@ Usage:
     )
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -34,17 +33,12 @@ from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
 
-# Per-user locks to prevent TOCTOU race conditions on token deduction.
-# Without this, concurrent requests for the same user can both pass
-# can_spend() and both deduct — draining the balance below zero.
-_user_locks: dict[str, asyncio.Lock] = {}
-
-
-def _get_user_lock(user_id: str) -> asyncio.Lock:
-    """Get or create a per-user asyncio lock."""
-    if user_id not in _user_locks:
-        _user_locks[user_id] = asyncio.Lock()
-    return _user_locks[user_id]
+# TOCTOU race protection for try_spend lives at the DB layer via
+# SELECT ... FOR UPDATE (see _get_or_create_balance(for_update=True)).
+# Postgres enforces a row lock that holds across all worker processes;
+# SQLite treats the hint as a no-op which is fine for single-process dev.
+# The previous in-process asyncio.Lock approach was unsafe with multiple
+# Railway/uvicorn workers since each worker held its own lock dict.
 
 # ── Constants ──────────────────────────────────────────────────────────
 
@@ -98,16 +92,22 @@ def tokens_to_dollars(tokens: float) -> float:
 # ── Wallet Operations ────────────────────────────────────────────────
 
 async def _get_or_create_balance(
-    session, user_id: str, *, grant_welcome: bool = False,
+    session, user_id: str, *, grant_welcome: bool = False, for_update: bool = False,
 ) -> TokenBalance:
     """Get a user's token balance, creating an empty wallet if new.
 
     Welcome grant is only issued when grant_welcome=True (first authenticated
     sign-in). Anonymous / placeholder users get zero tokens.
+
+    When for_update=True, the SELECT acquires a row-level lock (Postgres) so
+    concurrent try_spend calls for the same user serialize at the DB rather
+    than racing in process memory. Required for try_spend's atomicity
+    guarantee under multi-worker deployments.
     """
-    result = await session.execute(
-        select(TokenBalance).where(TokenBalance.user_id == user_id)
-    )
+    stmt = select(TokenBalance).where(TokenBalance.user_id == user_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await session.execute(stmt)
     balance = result.scalar_one_or_none()
 
     if balance is None:
@@ -273,9 +273,13 @@ async def try_spend(
 ) -> bool:
     """Atomic check-and-deduct: prevents TOCTOU race conditions.
 
-    Holds a per-user lock, checks balance, deducts tokens, and writes
-    audit trail in a single operation. Returns True if spend succeeded,
+    Acquires a DB row-level lock on the user's TokenBalance row via
+    SELECT ... FOR UPDATE, then checks balance, deducts tokens, and writes
+    audit trail in a single transaction. Returns True if spend succeeded,
     False if insufficient tokens.
+
+    The DB-level lock holds across all worker processes (Postgres prod);
+    SQLite (dev) treats the hint as a no-op which is fine for single-worker.
 
     This is the PREFERRED way to spend tokens. Use this instead of
     separate can_spend() + record_spend() calls.
@@ -288,59 +292,57 @@ async def try_spend(
             await _record_admin_spend(user_id, tokens, cost_usd, service, reason, model, metadata)
             return True
 
-    lock = _get_user_lock(user_id)
-    async with lock:
-        async with get_session() as session:
-            balance = await _get_or_create_balance(session, user_id)
+    async with get_session() as session:
+        balance = await _get_or_create_balance(session, user_id, for_update=True)
 
-            total = (
-                balance.free_tokens
-                + balance.sub_tokens
-                + balance.sub_rollover
-                + balance.purchased_tokens
-            )
-
-            if total < tokens:
-                return False
-
-            # Deduct tokens from wallets in priority order
-            deductions = await _deduct_tokens(session, balance, tokens, reason)
-
-            # Calculate total balance after deduction
-            total_after = (
-                balance.free_tokens + balance.sub_tokens
-                + balance.sub_rollover + balance.purchased_tokens
-            )
-
-            source_summary = ", ".join(f"{d['source']}={d['amount']:.1f}" for d in deductions)
-
-            # Write token transaction
-            session.add(TokenTransaction(
-                user_id=user_id,
-                type="spend",
-                amount=-tokens,
-                source=deductions[0]["source"] if deductions else "unknown",
-                reason=reason,
-                balance_after=total_after,
-            ))
-
-            # Write raw cost audit trail
-            session.add(CreditLedger(
-                user_id=user_id,
-                amount=0,  # bridge value — see model docstring
-                cost_usd=cost_usd,
-                service=service,
-                model=model,
-                reason=reason,
-                metadata_json=json.dumps(metadata) if metadata else None,
-                tokens_charged=tokens,
-            ))
-
-        logger.debug(
-            "Token spend (atomic): user=%s tokens=%.1f ($%.4f) service=%s reason=%s [%s]",
-            user_id, tokens, cost_usd, service, reason, source_summary,
+        total = (
+            balance.free_tokens
+            + balance.sub_tokens
+            + balance.sub_rollover
+            + balance.purchased_tokens
         )
-        return True
+
+        if total < tokens:
+            return False
+
+        # Deduct tokens from wallets in priority order
+        deductions = await _deduct_tokens(session, balance, tokens, reason)
+
+        # Calculate total balance after deduction
+        total_after = (
+            balance.free_tokens + balance.sub_tokens
+            + balance.sub_rollover + balance.purchased_tokens
+        )
+
+        source_summary = ", ".join(f"{d['source']}={d['amount']:.1f}" for d in deductions)
+
+        # Write token transaction
+        session.add(TokenTransaction(
+            user_id=user_id,
+            type="spend",
+            amount=-tokens,
+            source=deductions[0]["source"] if deductions else "unknown",
+            reason=reason,
+            balance_after=total_after,
+        ))
+
+        # Write raw cost audit trail
+        session.add(CreditLedger(
+            user_id=user_id,
+            amount=0,  # bridge value — see model docstring
+            cost_usd=cost_usd,
+            service=service,
+            model=model,
+            reason=reason,
+            metadata_json=json.dumps(metadata) if metadata else None,
+            tokens_charged=tokens,
+        ))
+
+    logger.debug(
+        "Token spend (atomic): user=%s tokens=%.1f ($%.4f) service=%s reason=%s [%s]",
+        user_id, tokens, cost_usd, service, reason, source_summary,
+    )
+    return True
 
 
 async def _record_admin_spend(
