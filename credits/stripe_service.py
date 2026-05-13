@@ -46,13 +46,7 @@ def _tax_kwargs() -> dict:
     """
     if os.environ.get("STRIPE_TAX_ENABLED", "").strip().lower() != "true":
         return {}
-    return {
-        "automatic_tax": {"enabled": True},
-        # Required when an existing Customer is passed AND automatic_tax is on
-        # — Stripe writes the address it collects during checkout back to the
-        # customer record so tax can be calculated on future renewals.
-        "customer_update": {"address": "auto"},
-    }
+    return {"automatic_tax": {"enabled": True}}
 
 
 # ── Product/Price Mappings ───────────────────────────────────────────
@@ -221,6 +215,10 @@ async def create_checkout_subscription(
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=success_url,
         cancel_url=cancel_url,
+        # Required when an existing Customer is passed — lets Stripe write
+        # address/name collected during Checkout back to the Customer for
+        # invoice compliance and future tax calc.
+        customer_update={"address": "auto", "name": "auto"},
         metadata={
             "user_id": user_id,
             "type": "subscription",
@@ -263,6 +261,12 @@ async def create_checkout_topup(
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=success_url,
         cancel_url=cancel_url,
+        customer_update={"address": "auto", "name": "auto"},
+        # Force the payment receipt email even if a Dashboard toggle drifts off.
+        payment_intent_data={"receipt_email": email},
+        # Issue a real Stripe Invoice so the customer also gets
+        # "Invoice paid" with a hosted invoice URL.
+        invoice_creation={"enabled": True},
         metadata={
             "user_id": user_id,
             "type": "topup",
