@@ -202,6 +202,7 @@ async def create_checkout_subscription(
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=success_url,
         cancel_url=cancel_url,
+        customer_update={"address": "auto", "name": "auto"},
         metadata={
             "user_id": user_id,
             "type": "subscription",
@@ -243,6 +244,9 @@ async def create_checkout_topup(
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=success_url,
         cancel_url=cancel_url,
+        customer_update={"address": "auto", "name": "auto"},
+        payment_intent_data={"receipt_email": email},
+        invoice_creation={"enabled": True},
         metadata={
             "user_id": user_id,
             "type": "topup",
