@@ -29,7 +29,9 @@
   /* ── Text ── */
   --txt-primary: 245 245 245;
   --txt-secondary: 163 163 163;
-  --txt-muted: 82 82 82;
+  /* Was 82 82 82 (#525252) — failed WCAG AA at 2.45:1 on surface-0 (#0f0f0f).
+   * Bumped to slate-400 = 7.72:1, passes AA + AAA. Issue #3 T12. */
+  --txt-muted: 148 163 184;
 
   /* ── Borders ── */
   --bdr: 38 38 38;
