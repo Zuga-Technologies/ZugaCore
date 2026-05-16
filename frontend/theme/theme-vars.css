@@ -120,7 +120,10 @@ html[data-theme="tarot"] {
 
   --txt-primary: 232 224 208;
   --txt-secondary: 170 160 140;
-  --txt-muted: 90 80 65;
+  /* Was 90 80 65 (#5a5041) — failed WCAG AA at 2.47:1 on surface-0 (#0d0a1a).
+   * Bumped to 155 145 128 (#9b9180) = 6.28:1, passes AA with headroom.
+   * Issue #3 T12 Phase 2 (mystical preset). */
+  --txt-muted: 155 145 128;
 
   --bdr: 45 35 60;
   --bdr-hover: 70 55 90;
@@ -163,7 +166,10 @@ html[data-theme="biblical"] {
 
   --txt-primary: 235 225 210;
   --txt-secondary: 180 165 140;
-  --txt-muted: 100 88 70;
+  /* Was 100 88 70 (#645846) — failed WCAG AA at 2.61:1 on surface-0 (#1a1510).
+   * Bumped to 155 140 118 (#9b8c76) = 5.53:1, passes AA with headroom.
+   * Issue #3 T12 Phase 2 (biblical preset). */
+  --txt-muted: 155 140 118;
 
   --bdr: 50 40 30;
   --bdr-hover: 75 60 45;
