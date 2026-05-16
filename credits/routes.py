@@ -36,6 +36,7 @@ from core.credits.stripe_service import (
     cancel_subscription,
     create_checkout_subscription,
     create_checkout_topup,
+    create_portal_session,
     get_available_plans,
     get_subscription_status,
 )
@@ -239,6 +240,29 @@ async def cancel_sub(user: CurrentUser = Depends(get_current_user)) -> dict:
         return await cancel_subscription(user.id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/tokens/portal")
+async def open_portal(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Create a Stripe Customer Portal session.
+
+    CA ARL: portal is the canonical "online cancellation" surface — users can
+    cancel, change payment, view invoices without contacting support.
+    """
+    base = _app_url()
+    try:
+        portal_url = await create_portal_session(
+            user_id=user.id,
+            email=user.email,
+            return_url=f"{base}/account/billing",
+        )
+    except RuntimeError as e:
+        logger.error("Stripe config error on portal: %s", e)
+        raise HTTPException(status_code=503, detail="Payment system not configured")
+    except Exception:
+        logger.exception("Unexpected error creating portal session")
+        raise HTTPException(status_code=500, detail="Failed to create portal session")
+    return {"portal_url": portal_url}
 
 
 @router.post("/api/webhooks/stripe")

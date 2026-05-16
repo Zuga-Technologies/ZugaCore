@@ -231,6 +231,25 @@ async def create_checkout_subscription(
                 "tier": tier,
                 "tokens_per_cycle": str(tier_info["tokens"]),
             },
+            # CA ARL — description shown on Stripe confirmation + invoices.
+            # Substantive placeholder for now; Mike-approved [T11A] copy
+            # replaces this before revenue launch.
+            "description": (
+                f"{tier_info['label']} — recurring monthly subscription. "
+                "Renews automatically until cancelled."
+            ),
+        },
+        # CA ARL — disclosure shown ABOVE the Subscribe button at checkout.
+        # [MIKE COPY T11A] placeholder; the final wording is Mike's lane.
+        custom_text={
+            "submit": {
+                "message": (
+                    f"You will be charged for {tier_info['label']} on a "
+                    "recurring monthly basis until you cancel. You can "
+                    "cancel anytime online from your account settings — "
+                    "no phone call required."
+                ),
+            },
         },
         **_tax_kwargs(),
     )

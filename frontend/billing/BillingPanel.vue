@@ -124,13 +124,22 @@ onMounted(() => store.fetchAll())
             </template>
           </p>
         </div>
-        <button
-          v-if="store.subscription.status === 'active'"
-          @click="store.cancelSubscription()"
-          class="bp-cta-ghost"
-        >
-          Cancel plan
-        </button>
+        <div class="bp-sub-actions">
+          <button
+            @click="store.openBillingPortal()"
+            class="bp-cta-ghost"
+            title="Manage payment, view invoices, or cancel"
+          >
+            Manage billing
+          </button>
+          <button
+            v-if="store.subscription.status === 'active'"
+            @click="store.cancelSubscription()"
+            class="bp-cta-ghost"
+          >
+            Cancel plan
+          </button>
+        </div>
       </div>
     </section>
 
@@ -477,6 +486,12 @@ onMounted(() => store.fetchAll())
   flex-wrap: wrap;
 }
 .bp-sub-block { flex: 1; min-width: 0; }
+.bp-sub-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
 .bp-card-label {
   font-size: 0.6875rem;
   font-weight: 600;

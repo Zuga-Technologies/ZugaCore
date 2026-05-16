@@ -108,6 +108,18 @@ export const useTokenStore = defineStore('zugatokens', () => {
     }
   }
 
+  async function openBillingPortal() {
+    // CA ARL: redirect to Stripe Customer Portal — the canonical
+    // online-cancellation surface. Returns user to /account/billing.
+    try {
+      const { portal_url } = await api.post<{ portal_url: string }>('/api/tokens/portal')
+      window.location.href = portal_url
+    } catch (e: any) {
+      console.error('Open billing portal failed:', e)
+      alert(e?.body?.detail || 'Could not open billing portal. Try again or contact support.')
+    }
+  }
+
   async function refresh() {
     await fetchAll()
     _notify()
@@ -133,6 +145,7 @@ export const useTokenStore = defineStore('zugatokens', () => {
     buyPack,
     subscribeTier,
     cancelSubscription,
+    openBillingPortal,
     refresh,
   }
 })
