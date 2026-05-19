@@ -187,3 +187,24 @@ async def set_onboarding_state(user_id: str, completed: bool) -> None:
         if user is None:
             raise ValueError("User not found")
         user.onboarding_completed = completed
+
+
+async def get_bg_theme_pref(user_id: str) -> str | None:
+    """Return the user account-level wallpaper theme preference, or None."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord.bg_theme_pref).where(UserRecord.id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def set_bg_theme_pref(user_id: str, theme: str | None) -> None:
+    """Persist the account-level wallpaper theme preference."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.id == user_id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise ValueError("User not found")
+        user.bg_theme_pref = theme

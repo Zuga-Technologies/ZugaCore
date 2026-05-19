@@ -54,6 +54,16 @@ async def run_auth_migrations(db_path: str) -> None:
             )
             logger.info("Migration: added onboarding_completed column to users")
 
+        # bg_theme_pref: account-scoped wallpaper selection (overrides
+        # device localStorage zugalife-bg-theme so the theme follows the
+        # user across devices). Value is a theme id like "fireflies" or
+        # a user-uploaded theme id like "th_abc123". NULL = use default.
+        if not await _column_exists(db, "users", "bg_theme_pref"):
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN bg_theme_pref VARCHAR(64) DEFAULT NULL"
+            )
+            logger.info("Migration: added bg_theme_pref column to users")
+
         await db.commit()
 
     logger.info("Auth migrations complete")

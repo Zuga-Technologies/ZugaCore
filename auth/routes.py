@@ -723,6 +723,32 @@ async def get_onboarding(user: CurrentUser = Depends(get_current_user)) -> dict:
     return {"completed": completed}
 
 
+class BgThemePrefBody(BaseModel):
+    theme: str | None = None
+
+
+@router.get("/bg-theme-pref")
+async def get_bg_theme_pref_route(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Return the users account-scoped wallpaper theme id (None = unset)."""
+    from auth.repository import get_bg_theme_pref
+    theme = await get_bg_theme_pref(user.id)
+    return {"theme": theme}
+
+
+@router.patch("/bg-theme-pref")
+async def patch_bg_theme_pref_route(
+    body: BgThemePrefBody,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Persist the users account-scoped wallpaper theme id."""
+    from auth.repository import set_bg_theme_pref
+    val = (body.theme or None)
+    if val and len(val) > 64:
+        val = val[:64]
+    await set_bg_theme_pref(user.id, val)
+    return {"theme": val}
+
+
 @router.post("/onboarding/complete")
 async def complete_onboarding(user: CurrentUser = Depends(get_current_user)) -> dict:
     """Mark app-level onboarding as completed."""

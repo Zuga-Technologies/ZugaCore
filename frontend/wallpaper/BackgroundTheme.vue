@@ -4,6 +4,7 @@ import { api } from '@core/api/client'
 import {
   type ThemeId,
   getSavedTheme,
+  hydrateThemeFromServer,
   getTheme,
   getCustomImage,
   getCustomOpacity,
@@ -183,6 +184,14 @@ onMounted(() => {
   motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
   prefersReducedMotion.value = motionQuery.matches
   motionQuery.addEventListener('change', (e) => { prefersReducedMotion.value = e.matches })
+
+  // Account-scoped theme hydration. If the user has a server-side
+  // preference, pull it now and override the device-local default so
+  // wallpaper follows the user across devices.
+  hydrateThemeFromServer().then(() => {
+    const next = getSavedTheme()
+    if (next !== currentTheme.value) currentTheme.value = next as any
+  })
 })
 
 // Force playback rate — browsers reset it on load/play/loop

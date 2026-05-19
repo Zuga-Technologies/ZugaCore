@@ -180,7 +180,32 @@ export function getSavedTheme(): ThemeId | string {
   if (THEMES.some(t => t.id === saved)) return saved as ThemeId
   return 'none'
 }
-export function saveTheme(id: ThemeId | string) { localStorage.setItem(STORAGE_KEY, id) }
+export function saveTheme(id: ThemeId | string) {
+  localStorage.setItem(STORAGE_KEY, id)
+  // Account-scoped: persist server-side so the theme follows the user
+  // across devices. Fire-and-forget — silent on network/auth failure
+  // so anonymous + offline paths keep working off localStorage.
+  try {
+    fetch('/api/auth/bg-theme-pref', {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: id }),
+    }).catch(() => {})
+  } catch { /* noop */ }
+}
+
+// Hydrate from server when the page loads (post-auth). Caller awaits, then
+// reads getSavedTheme(). Silent on failure so anon visitors still render.
+export async function hydrateThemeFromServer(): Promise<void> {
+  try {
+    const res = await fetch('/api/auth/bg-theme-pref', { credentials: 'include' })
+    if (!res.ok) return
+    const data = await res.json()
+    const theme = (data && typeof data.theme === 'string') ? data.theme : null
+    if (theme) localStorage.setItem(STORAGE_KEY, theme)
+  } catch { /* noop */ }
+}
 export function getTheme(id: ThemeId): ThemeDefinition {
   return THEMES.find(t => t.id === id) || THEMES[0]
 }
