@@ -411,7 +411,17 @@ async def record_spend(
     1. Deducts tokens from wallets (free → sub → purchased)
     2. Writes a token_transaction record
     3. Writes a credit_ledger record (raw cost audit)
+
+    Admins (unlimited emails) are audited but never deducted — mirrors the
+    bypass in try_spend(). record_spend takes no email arg, so we resolve it
+    from the stored UserRecord. This protects admin wallets from any
+    standalone-studio path (e.g. /api/credits/report-spend) that lands here.
     """
+    admin_email = await _get_user_email(user_id)
+    if admin_email and _is_unlimited(admin_email):
+        await _record_admin_spend(user_id, tokens, cost_usd, service, reason, model, metadata)
+        return
+
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
 
