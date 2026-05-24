@@ -305,8 +305,11 @@ onMounted(() => store.fetchAll())
       </div>
     </section>
 
+    <!-- ── Settings + insights grid (2-col on desktop, 1-col on mobile) ─── -->
+    <div v-if="showHistory" class="bp-grid">
+
     <!-- ── Monthly spending cap ─────────────────────────────────────────── -->
-    <section v-if="showHistory && !store.balance.is_unlimited" class="bp-card bp-cap">
+    <section v-if="!store.balance.is_unlimited" class="bp-card bp-cap">
       <div class="bp-cap-inner">
         <div class="bp-cap-head">
           <div class="bp-cap-title-row">
@@ -344,7 +347,7 @@ onMounted(() => store.fetchAll())
     </section>
 
     <!-- ── Auto top-up (only when server flag is on) ────────────────────── -->
-    <section v-if="showHistory && store.autotopup.available && !store.balance.is_unlimited" class="bp-card bp-cap">
+    <section v-if="store.autotopup.available && !store.balance.is_unlimited" class="bp-card bp-cap">
       <div class="bp-cap-inner">
         <div class="bp-cap-title-row">
           <Zap :size="16" :stroke-width="2.4" class="bp-cap-icon" />
@@ -401,7 +404,7 @@ onMounted(() => store.fetchAll())
     </section>
 
     <!-- ── Usage breakdown — where your tokens go ───────────────────────── -->
-    <section v-if="showHistory && usageRows.length" class="bp-card bp-usage">
+    <section v-if="usageRows.length" class="bp-card bp-usage">
       <header class="bp-card-header">
         <h2 class="bp-card-title">
           <PieChart :size="15" :stroke-width="2" class="bp-card-title-icon" />
@@ -430,6 +433,8 @@ onMounted(() => store.fetchAll())
         </li>
       </ul>
     </section>
+
+    </div><!-- /bp-grid -->
 
     <!-- ── Transaction history ──────────────────────────────────────────── -->
     <section v-if="showHistory" class="bp-card bp-history">
@@ -823,6 +828,20 @@ onMounted(() => store.fetchAll())
 .bp-sub-cancelling {
   color: var(--feedback-warn, #ca8a04);
   font-weight: 500;
+}
+
+/* ── Settings + insights grid ────────────────────────────── */
+.bp-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.bp-grid > .bp-card { margin-bottom: 0; height: 100%; }
+@media (min-width: 1024px) {
+  /* auto-fit collapses empty tracks, so a lone card fills the row while two
+     cards split it — robust to the conditional auto-top-up / usage cards. */
+  .bp-grid { grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); align-items: start; }
 }
 
 /* ── Spending cap ────────────────────────────────────────── */
