@@ -18,7 +18,7 @@ import time
 import stripe
 from sqlalchemy import select
 
-from core.credits.models import Subscription
+from core.credits.models import Subscription, TokenBalance
 from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,95 @@ async def _store_customer_id(user_id: str, customer_id: str) -> None:
         sub = result.scalar_one_or_none()
         if sub and not sub.stripe_cust_id:
             sub.stripe_cust_id = customer_id
+
+
+# ── Auto top-up: SetupIntent + off-session charge ────────────────────
+#
+# SECURITY: charge_offsession charges a saved card without the user present.
+# It is only ever reached when AUTOTOPUP_ENABLED is set AND the user opted in
+# AND a payment method was saved via a SetupIntent. Every charge is idempotent
+# at the webhook (keyed on the PaymentIntent id) and rate-guarded in the
+# manager (autotopup_last_charge). Verify end-to-end in Stripe TEST mode
+# before enabling in prod.
+
+async def create_setup_intent(user_id: str, email: str) -> dict:
+    """Create a SetupIntent so the frontend (Stripe.js) can save a card for
+    off-session auto top-up. Returns {client_secret, customer_id}."""
+    _init_stripe()
+    customer_id = await get_or_create_customer(user_id, email)
+    intent = stripe.SetupIntent.create(
+        customer=customer_id,
+        usage="off_session",
+        payment_method_types=["card"],
+        metadata={"user_id": user_id, "purpose": "autotopup"},
+    )
+    logger.info("Created autotopup SetupIntent for user %s", user_id)
+    return {"client_secret": intent.client_secret, "customer_id": customer_id}
+
+
+async def get_saved_card(user_id: str) -> dict | None:
+    """Return {brand, last4} for the user's saved auto top-up card, or None."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(TokenBalance.autotopup_pm_id).where(TokenBalance.user_id == user_id)
+        )
+        pm_id = result.scalar_one_or_none()
+    if not pm_id:
+        return None
+    try:
+        _init_stripe()
+        pm = stripe.PaymentMethod.retrieve(pm_id)
+        card = pm.get("card") or {}
+        return {"brand": card.get("brand"), "last4": card.get("last4")}
+    except Exception as e:
+        logger.warning("Could not retrieve saved card for user %s: %s", user_id, e)
+        return None
+
+
+async def charge_offsession(user_id: str, pack: str) -> dict:
+    """Charge the user's saved card off-session for a top-up pack.
+
+    Returns {status, payment_intent}. Token crediting happens in the
+    payment_intent.succeeded webhook (idempotent), never here.
+    """
+    if pack not in TOPUP_PACKS:
+        raise ValueError(f"Invalid pack: {pack}")
+    async with get_session() as session:
+        result = await session.execute(
+            select(
+                TokenBalance.autotopup_cust_id,
+                TokenBalance.autotopup_pm_id,
+            ).where(TokenBalance.user_id == user_id)
+        )
+        row = result.one_or_none()
+    if not row or not row[0] or not row[1]:
+        raise ValueError("No saved payment method for off-session charge")
+    customer_id, pm_id = row[0], row[1]
+
+    _init_stripe()
+    pack_info = TOPUP_PACKS[pack]
+    price_id = _get_price_id(pack_info["price_env"])
+    amount = _fetch_stripe_price(price_id)
+    if not amount:
+        raise ValueError(f"Could not resolve price for pack {pack}")
+
+    intent = stripe.PaymentIntent.create(
+        amount=amount,
+        currency="usd",
+        customer=customer_id,
+        payment_method=pm_id,
+        off_session=True,
+        confirm=True,
+        metadata={
+            "user_id": user_id,
+            "type": "topup",
+            "source": "autotopup",
+            "pack": pack,
+            "tokens": str(pack_info["tokens"]),
+        },
+    )
+    logger.info("Off-session autotopup charge for user %s pack %s → %s", user_id, pack, intent.status)
+    return {"status": intent.status, "payment_intent": intent.id}
 
 
 # ── Checkout Sessions ────────────────────────────────────────────────

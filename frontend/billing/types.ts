@@ -56,3 +56,18 @@ export interface HistoryFilter {
   type: string | null   // transaction type: spend|purchase|subscription|grant|refund
   days: number | null   // trailing window
 }
+
+export interface SpendingCap {
+  cap_tokens: number | null      // null = no cap
+  spent_this_period: number
+  period_start: string | null
+}
+
+export interface AutotopupSettings {
+  available: boolean             // false when the server feature flag is off
+  enabled?: boolean
+  threshold?: number | null
+  pack?: string | null
+  has_card?: boolean
+  card?: { brand: string | null; last4: string | null } | null
+}

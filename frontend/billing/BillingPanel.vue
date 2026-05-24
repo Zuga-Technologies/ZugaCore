@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, watch, nextTick } from 'vue'
+import { loadStripe, type Stripe, type StripeCardElement } from '@stripe/stripe-js'
 import { useTokenStore } from './useTokens'
 import { txTypeLabel, formatDate } from './helpers'
 import { reasonMeta } from './reasonMap'
 import {
   Coins, ShoppingCart, CreditCard, TrendingDown, TrendingUp,
-  Gift, Zap, Clock, Infinity, X, Download, PieChart,
+  Gift, Zap, Clock, Infinity, X, Download, PieChart, ShieldCheck,
 } from 'lucide-vue-next'
 
 const props = withDefaults(defineProps<{
@@ -97,6 +98,101 @@ function exportCsv() {
   a.download = `zugatokens-history-${new Date().toISOString().slice(0, 10)}.csv`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+// ── Monthly spending cap ────────────────────────────────────────────────
+const capInput = ref<number | null>(null)
+const capSaving = ref(false)
+watch(() => store.spendingCap, (c) => { capInput.value = c?.cap_tokens ?? null }, { immediate: true })
+
+const capActive = computed(() => !!store.spendingCap?.cap_tokens)
+const capPct = computed(() => {
+  const c = store.spendingCap
+  if (!c || !c.cap_tokens) return 0
+  return Math.min(100, (c.spent_this_period / c.cap_tokens) * 100)
+})
+
+async function saveCap() {
+  capSaving.value = true
+  try {
+    await store.setCap(capInput.value && capInput.value > 0 ? Math.round(capInput.value) : null)
+  } finally { capSaving.value = false }
+}
+async function removeCap() {
+  capSaving.value = true
+  try { await store.setCap(null); capInput.value = null }
+  finally { capSaving.value = false }
+}
+
+// ── Auto top-up (opt-in; only shown when server flag is on) ─────────────
+const TOPUP_PACK_OPTIONS = [
+  { value: 'starter', label: '200 tokens' },
+  { value: 'standard', label: '550 tokens' },
+  { value: 'best_value', label: '1,200 tokens' },
+  { value: 'bulk', label: '3,500 tokens' },
+]
+const atEnabled = ref(false)
+const atThreshold = ref<number | null>(null)
+const atPack = ref('standard')
+const atSaving = ref(false)
+watch(() => store.autotopup, (a) => {
+  atEnabled.value = !!a.enabled
+  atThreshold.value = a.threshold ?? null
+  atPack.value = a.pack || 'standard'
+}, { immediate: true, deep: true })
+
+async function saveAutotopup() {
+  atSaving.value = true
+  try {
+    await store.setAutotopup({
+      enabled: atEnabled.value,
+      threshold: atThreshold.value && atThreshold.value > 0 ? Math.round(atThreshold.value) : null,
+      pack: atPack.value,
+    })
+  } finally { atSaving.value = false }
+}
+
+// Stripe Elements card capture for the SetupIntent
+let stripe: Stripe | null = null
+let cardEl: StripeCardElement | null = null
+const cardFormOpen = ref(false)
+const cardMountRef = ref<HTMLElement | null>(null)
+const cardError = ref('')
+const cardSaving = ref(false)
+
+async function openCardForm() {
+  cardError.value = ''
+  const pk = (import.meta as any).env?.VITE_STRIPE_PUBLISHABLE_KEY
+  if (!pk) { cardError.value = 'Stripe is not configured.'; return }
+  if (!stripe) stripe = await loadStripe(pk)
+  if (!stripe) { cardError.value = 'Could not load Stripe.'; return }
+  cardFormOpen.value = true
+  await nextTick()
+  const elements = stripe.elements()
+  cardEl = elements.create('card', { style: { base: { color: '#e7e5e4', fontSize: '15px', '::placeholder': { color: '#737373' } } } })
+  if (cardMountRef.value) cardEl.mount(cardMountRef.value)
+}
+
+function closeCardForm() {
+  cardEl?.unmount()
+  cardEl = null
+  cardFormOpen.value = false
+}
+
+async function submitCard() {
+  if (!stripe || !cardEl) return
+  cardSaving.value = true
+  cardError.value = ''
+  try {
+    const { client_secret } = await store.createSetupIntent()
+    const { error } = await stripe.confirmCardSetup(client_secret, { payment_method: { card: cardEl } })
+    if (error) { cardError.value = error.message || 'Card setup failed.'; return }
+    closeCardForm()
+    // The webhook saves the card a moment later — refresh shortly after.
+    setTimeout(() => store.fetchAutotopup(), 2000)
+  } catch (e: any) {
+    cardError.value = e?.body?.detail || 'Could not save card.'
+  } finally { cardSaving.value = false }
 }
 
 onMounted(() => store.fetchAll())
@@ -205,6 +301,101 @@ onMounted(() => store.fetchAll())
           >
             Cancel plan
           </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Monthly spending cap ─────────────────────────────────────────── -->
+    <section v-if="showHistory && !store.balance.is_unlimited" class="bp-card bp-cap">
+      <div class="bp-cap-inner">
+        <div class="bp-cap-head">
+          <div class="bp-cap-title-row">
+            <ShieldCheck :size="16" :stroke-width="2" class="bp-cap-icon" />
+            <div>
+              <p class="bp-card-label">Monthly spending cap</p>
+              <p class="bp-cap-hint">Auto-blocks spending past this many tokens each 30 days. Leave blank for no cap.</p>
+            </div>
+          </div>
+        </div>
+        <div class="bp-cap-controls">
+          <input
+            v-model.number="capInput"
+            type="number"
+            min="0"
+            step="50"
+            inputmode="numeric"
+            placeholder="No cap"
+            class="bp-cap-input"
+            aria-label="Monthly token cap"
+          />
+          <button class="bp-cap-save" :disabled="capSaving" @click="saveCap">Save</button>
+          <button v-if="capActive" class="bp-cap-clear" :disabled="capSaving" @click="removeCap">Remove</button>
+        </div>
+        <div v-if="capActive" class="bp-cap-progress">
+          <div class="bp-cap-track">
+            <div class="bp-cap-fill" :class="{ 'bp-cap-fill-warn': capPct >= 80 }" :style="{ width: capPct + '%' }" />
+          </div>
+          <p class="bp-cap-meta">
+            {{ Math.round(store.spendingCap!.spent_this_period).toLocaleString() }}
+            / {{ Math.round(store.spendingCap!.cap_tokens!).toLocaleString() }} tokens this period
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Auto top-up (only when server flag is on) ────────────────────── -->
+    <section v-if="showHistory && store.autotopup.available && !store.balance.is_unlimited" class="bp-card bp-cap">
+      <div class="bp-cap-inner">
+        <div class="bp-cap-title-row">
+          <Zap :size="16" :stroke-width="2.4" class="bp-cap-icon" />
+          <div>
+            <p class="bp-card-label">Auto top-up</p>
+            <p class="bp-cap-hint">Automatically buy more tokens when your balance runs low, so you never get interrupted mid-task.</p>
+          </div>
+        </div>
+
+        <!-- Saved card / add card -->
+        <div class="bp-at-card-row">
+          <template v-if="store.autotopup.card?.last4">
+            <CreditCard :size="15" :stroke-width="2" />
+            <span class="bp-at-card-text">{{ store.autotopup.card.brand }} •••• {{ store.autotopup.card.last4 }}</span>
+            <button class="bp-cap-clear" @click="openCardForm">Replace card</button>
+          </template>
+          <template v-else>
+            <span class="bp-at-card-text bp-at-muted">No card on file</span>
+            <button class="bp-cap-save" @click="openCardForm">Add a card</button>
+          </template>
+        </div>
+
+        <!-- Card capture form -->
+        <div v-if="cardFormOpen" class="bp-at-cardform">
+          <div ref="cardMountRef" class="bp-at-card-element" />
+          <div class="bp-at-cardform-actions">
+            <button class="bp-cap-save" :disabled="cardSaving" @click="submitCard">{{ cardSaving ? 'Saving…' : 'Save card' }}</button>
+            <button class="bp-cap-clear" :disabled="cardSaving" @click="closeCardForm">Cancel</button>
+          </div>
+          <p v-if="cardError" class="bp-at-error">{{ cardError }}</p>
+        </div>
+
+        <!-- Settings (only meaningful once a card is saved) -->
+        <div class="bp-at-settings" :class="{ 'bp-at-disabled': !store.autotopup.has_card }">
+          <label class="bp-at-toggle">
+            <input type="checkbox" v-model="atEnabled" :disabled="!store.autotopup.has_card" />
+            <span>Enable auto top-up</span>
+          </label>
+          <div class="bp-at-fields">
+            <label class="bp-at-field">
+              <span>When balance falls below</span>
+              <input v-model.number="atThreshold" type="number" min="0" step="50" placeholder="100" class="bp-cap-input" :disabled="!store.autotopup.has_card" />
+            </label>
+            <label class="bp-at-field">
+              <span>buy</span>
+              <select v-model="atPack" class="bp-filter-select" :disabled="!store.autotopup.has_card">
+                <option v-for="o in TOPUP_PACK_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+            </label>
+          </div>
+          <button class="bp-cap-save" :disabled="atSaving || !store.autotopup.has_card" @click="saveAutotopup">Save</button>
         </div>
       </div>
     </section>
@@ -633,6 +824,107 @@ onMounted(() => store.fetchAll())
   color: var(--feedback-warn, #ca8a04);
   font-weight: 500;
 }
+
+/* ── Spending cap ────────────────────────────────────────── */
+.bp-cap-inner { padding: 1.5rem; }
+.bp-cap-title-row { display: flex; align-items: flex-start; gap: 0.625rem; margin-bottom: 1rem; }
+.bp-cap-icon { color: var(--accent-brand, #a3e635); flex-shrink: 0; margin-top: 0.0625rem; }
+.bp-cap-hint {
+  font-size: 0.75rem;
+  color: var(--text-tertiary, #737373);
+  margin-top: 0.25rem;
+  max-width: 30rem;
+  line-height: 1.4;
+}
+.bp-cap-controls { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.bp-cap-input {
+  width: 9rem;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-default, #404040);
+  background: oklch(0.13 0.005 280);
+  color: var(--text-primary, #e7e5e4);
+}
+.bp-cap-input:focus-visible {
+  outline: 2px solid var(--accent-brand, #a3e635);
+  outline-offset: 1px;
+}
+.bp-cap-save {
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  border: 0;
+  background: var(--accent-brand, #a3e635);
+  color: var(--accent-fg, #0a0a0a);
+  font-weight: 600;
+  font-size: 0.8125rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+.bp-cap-save:hover:not(:disabled) { background: var(--accent-brand-strong, #84cc16); }
+.bp-cap-save:disabled { opacity: 0.5; cursor: not-allowed; }
+.bp-cap-clear {
+  padding: 0.5rem 0.875rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-default, #404040);
+  background: transparent;
+  color: var(--text-tertiary, #737373);
+  font-size: 0.8125rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+.bp-cap-clear:hover:not(:disabled) { color: var(--text-primary, #e7e5e4); border-color: var(--text-tertiary, #737373); }
+.bp-cap-progress { margin-top: 1.125rem; }
+.bp-cap-track { height: 8px; border-radius: 999px; background: oklch(0.13 0.005 280); overflow: hidden; }
+.bp-cap-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent-brand, #a3e635);
+  transition: width 400ms cubic-bezier(0.2, 0, 0, 1);
+}
+.bp-cap-fill-warn { background: var(--feedback-warn, #ca8a04); }
+.bp-cap-meta {
+  font-size: 0.75rem;
+  color: var(--text-secondary, #a3a3a3);
+  margin-top: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Auto top-up ─────────────────────────────────────────── */
+.bp-at-card-row {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.75rem 0.875rem;
+  border-radius: 9px;
+  background: oklch(0.13 0.005 280);
+  border: 1px solid var(--border-subtle, #262626);
+  color: var(--text-secondary, #a3a3a3);
+  margin-bottom: 1rem;
+}
+.bp-at-card-text { font-size: 0.8125rem; text-transform: capitalize; }
+.bp-at-card-text.bp-at-muted { color: var(--text-tertiary, #737373); text-transform: none; }
+.bp-at-card-row > button { margin-left: auto; }
+.bp-at-cardform {
+  padding: 0.875rem;
+  border-radius: 9px;
+  background: oklch(0.13 0.005 280);
+  border: 1px solid var(--border-default, #404040);
+  margin-bottom: 1rem;
+}
+.bp-at-card-element { padding: 0.625rem 0.75rem; border-radius: 8px; background: oklch(0.18 0.008 280); }
+.bp-at-cardform-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+.bp-at-error { font-size: 0.75rem; color: var(--feedback-danger, #ef4444); margin-top: 0.5rem; }
+.bp-at-settings { display: flex; flex-direction: column; gap: 0.875rem; }
+.bp-at-settings.bp-at-disabled { opacity: 0.5; }
+.bp-at-toggle { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; color: var(--text-secondary, #a3a3a3); cursor: pointer; }
+.bp-at-fields { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.bp-at-field { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; color: var(--text-tertiary, #737373); }
+.bp-at-field .bp-cap-input { width: 6rem; }
 
 /* ── Usage breakdown ─────────────────────────────────────── */
 .bp-usage { padding: 0; }

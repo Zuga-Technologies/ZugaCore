@@ -25,6 +25,7 @@ from core.credits.manager import (
     add_subscription_tokens,
     claw_back_purchased_tokens,
     grant_tokens,
+    store_autotopup_pm,
 )
 from core.credits.models import Subscription, TokenTransaction
 from core.credits.stripe_service import (
@@ -499,6 +500,46 @@ async def _handle_charge_dispute_created(dispute: dict) -> dict:
     return await _claw_back_for_charge(charge, refund_fraction=1.0, idempotency_id=dispute_id, reason="dispute")
 
 
+async def _handle_setup_intent_succeeded(setup_intent: dict) -> dict:
+    """Handle setup_intent.succeeded — save the card for off-session auto top-up."""
+    metadata = setup_intent.get("metadata") or {}
+    if metadata.get("purpose") != "autotopup":
+        return {"status": "ignored", "reason": "not an autotopup setup intent"}
+    user_id = metadata.get("user_id")
+    customer_id = setup_intent.get("customer")
+    pm_id = setup_intent.get("payment_method")
+    if not (user_id and customer_id and pm_id):
+        return {"status": "ignored", "reason": "missing user/customer/payment_method"}
+    await store_autotopup_pm(user_id, customer_id, pm_id)
+    return {"status": "autotopup_pm_saved", "user_id": user_id}
+
+
+async def _handle_payment_intent_succeeded(payment_intent: dict) -> dict:
+    """Handle payment_intent.succeeded — credit off-session auto top-ups.
+
+    Only acts on PaymentIntents we created for auto top-up (metadata
+    type=topup, source=autotopup). Checkout-driven top-ups are credited by
+    checkout.session.completed; the shared 'purchase' idempotency key on the
+    PaymentIntent id makes a double-credit impossible even if both fire.
+    """
+    metadata = payment_intent.get("metadata") or {}
+    if metadata.get("type") != "topup" or metadata.get("source") != "autotopup":
+        return {"status": "ignored", "reason": "not an autotopup payment intent"}
+    user_id = metadata.get("user_id")
+    pack = metadata.get("pack")
+    pi_id = payment_intent.get("id")
+    if not pack or pack not in TOPUP_PACKS:
+        logger.error("Invalid pack on autotopup PI: pack=%s user=%s", pack, user_id)
+        return {"status": "error", "reason": "invalid pack"}
+    if pi_id and await _already_processed(pi_id, "purchase"):
+        logger.info("Duplicate autotopup PI skipped: %s", pi_id)
+        return {"status": "already_processed"}
+    tokens = TOPUP_PACKS[pack]["tokens"]
+    await add_purchased_tokens(user_id, tokens, stripe_id=pi_id)
+    logger.info("Auto top-up credited: user=%s pack=%s tokens=%d pi=%s", user_id, pack, tokens, pi_id)
+    return {"status": "autotopup_credited", "pack": pack, "tokens": tokens}
+
+
 # ── Event Router ─────────────────────────────────────────────────────
 
 _EVENT_HANDLERS = {
@@ -506,7 +547,9 @@ _EVENT_HANDLERS = {
     "invoice.paid": _handle_invoice_paid,
     "customer.subscription.updated": _handle_subscription_updated,
     "customer.subscription.deleted": _handle_subscription_deleted,
+    "payment_intent.succeeded": _handle_payment_intent_succeeded,
     "payment_intent.payment_failed": _handle_payment_failed,
+    "setup_intent.succeeded": _handle_setup_intent_succeeded,
     "charge.refunded": _handle_charge_refunded,
     "charge.dispute.created": _handle_charge_dispute_created,
 }

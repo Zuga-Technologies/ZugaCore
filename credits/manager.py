@@ -305,8 +305,24 @@ async def try_spend(
         if total < tokens:
             return False
 
+        # Monthly spending cap (opt-in; None = no cap). Rolls every 30 days.
+        if balance.monthly_cap_tokens is not None:
+            now = datetime.now(timezone.utc)
+            start = balance.cap_period_start
+            if start is not None and start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            if start is None or (now - start) >= timedelta(days=30):
+                balance.cap_period_start = now
+                balance.cap_spent_tokens = 0
+            if (balance.cap_spent_tokens or 0) + tokens > balance.monthly_cap_tokens:
+                return False
+
         # Deduct tokens from wallets in priority order
         deductions = await _deduct_tokens(session, balance, tokens, reason)
+
+        # Count this spend against the monthly cap window
+        if balance.monthly_cap_tokens is not None:
+            balance.cap_spent_tokens = (balance.cap_spent_tokens or 0) + tokens
 
         # Calculate total balance after deduction
         total_after = (
@@ -342,6 +358,12 @@ async def try_spend(
         "Token spend (atomic): user=%s tokens=%.1f ($%.4f) service=%s reason=%s [%s]",
         user_id, tokens, cost_usd, service, reason, source_summary,
     )
+
+    # Low-balance auto top-up (opt-in; server-gated). Best-effort — a failed
+    # top-up never fails the spend that already succeeded above.
+    if os.environ.get("AUTOTOPUP_ENABLED", "").strip().lower() == "true":
+        await maybe_autotopup(user_id)
+
     return True
 
 
@@ -599,6 +621,118 @@ async def grant_tokens(
 
     logger.info("Granted %s tokens to user %s (reason: %s)", tokens, user_id, reason)
     return {"tokens_granted": tokens, "new_total": total}
+
+
+async def get_spending_cap(user_id: str) -> dict:
+    """Return the user's monthly spending cap state (None cap = disabled)."""
+    async with get_session() as session:
+        balance = await _get_or_create_balance(session, user_id)
+        return {
+            "cap_tokens": balance.monthly_cap_tokens,
+            "spent_this_period": balance.cap_spent_tokens or 0,
+            "period_start": (
+                balance.cap_period_start.isoformat()
+                if balance.cap_period_start else None
+            ),
+        }
+
+
+async def set_spending_cap(user_id: str, cap_tokens: float | None) -> dict:
+    """Set (or clear, with None) a user's monthly token spending cap.
+
+    Anchors a fresh 30-day window the first time a cap is enabled; changing the
+    amount mid-window keeps the running spent total so users can't reset it by
+    nudging the number.
+    """
+    if cap_tokens is not None and cap_tokens < 0:
+        raise ValueError(f"cap_tokens must be >= 0 or None, got {cap_tokens}")
+    async with get_session() as session:
+        balance = await _get_or_create_balance(session, user_id)
+        balance.monthly_cap_tokens = cap_tokens
+        if cap_tokens is not None and balance.cap_period_start is None:
+            balance.cap_period_start = datetime.now(timezone.utc)
+            balance.cap_spent_tokens = 0
+    return await get_spending_cap(user_id)
+
+
+# ── Auto top-up (opt-in; gated by AUTOTOPUP_ENABLED) ──────────────────
+
+async def get_autotopup_settings(user_id: str) -> dict:
+    """Return the user's auto top-up settings + whether a card is saved."""
+    async with get_session() as session:
+        balance = await _get_or_create_balance(session, user_id)
+        return {
+            "enabled": bool(balance.autotopup_enabled),
+            "threshold": balance.autotopup_threshold,
+            "pack": balance.autotopup_pack,
+            "has_card": bool(balance.autotopup_pm_id),
+        }
+
+
+async def set_autotopup_settings(
+    user_id: str,
+    enabled: bool | None = None,
+    threshold: float | None = None,
+    pack: str | None = None,
+) -> dict:
+    """Update auto top-up settings. Only provided fields change."""
+    async with get_session() as session:
+        balance = await _get_or_create_balance(session, user_id)
+        if enabled is not None:
+            balance.autotopup_enabled = enabled
+        if threshold is not None:
+            balance.autotopup_threshold = threshold
+        if pack is not None:
+            balance.autotopup_pack = pack
+    return await get_autotopup_settings(user_id)
+
+
+async def store_autotopup_pm(user_id: str, customer_id: str, pm_id: str) -> None:
+    """Persist the SetupIntent's customer + payment method for off-session charges."""
+    async with get_session() as session:
+        balance = await _get_or_create_balance(session, user_id)
+        balance.autotopup_cust_id = customer_id
+        balance.autotopup_pm_id = pm_id
+    logger.info("Stored autotopup payment method for user %s", user_id)
+
+
+async def maybe_autotopup(user_id: str) -> bool:
+    """If enabled + below threshold + card on file + not charged in the last
+    hour, fire one off-session top-up. Best-effort: never raises into the
+    spend path. Returns True if a charge was attempted."""
+    try:
+        pack: str | None = None
+        async with get_session() as session:
+            balance = await _get_or_create_balance(session, user_id, for_update=True)
+            if not balance.autotopup_enabled:
+                return False
+            if not (balance.autotopup_pm_id and balance.autotopup_cust_id):
+                return False
+            if not (balance.autotopup_threshold and balance.autotopup_pack):
+                return False
+            total = (
+                balance.free_tokens + balance.sub_tokens
+                + balance.sub_rollover + balance.purchased_tokens
+            )
+            if total >= balance.autotopup_threshold:
+                return False
+            now = datetime.now(timezone.utc)
+            last = balance.autotopup_last_charge
+            if last is not None and last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if last is not None and (now - last) < timedelta(hours=1):
+                return False
+            # Claim the charge window inside the lock so concurrent spends don't
+            # double-fire, then charge outside the session.
+            balance.autotopup_last_charge = now
+            pack = balance.autotopup_pack
+
+        from core.credits.stripe_service import charge_offsession
+        await charge_offsession(user_id, pack)
+        return True
+    except Exception as e:
+        logger.warning("Auto top-up failed for user %s: %s", user_id, e)
+        return False
 
 
 # ── Test Tier Toggle ──────────────────────────────────────────────────

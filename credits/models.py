@@ -70,6 +70,23 @@ class TokenBalance(Base, TimestampMixin):
     # Purchased (top-up) tokens — never expire
     purchased_tokens: Mapped[float] = mapped_column(Float, default=0)
 
+    # Monthly spending cap (opt-in). None = no cap. Enforced in try_spend over a
+    # rolling 30-day window anchored at cap_period_start. Auto-migrates (nullable).
+    monthly_cap_tokens: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cap_period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cap_spent_tokens: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+
+    # Auto top-up (opt-in, default OFF; gated server-side by AUTOTOPUP_ENABLED).
+    # When balance drops below autotopup_threshold, charge the saved card
+    # off-session for autotopup_pack. autotopup_cust_id/pm_id come from a
+    # SetupIntent. autotopup_last_charge guards against repeat charges.
+    autotopup_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    autotopup_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    autotopup_pack: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    autotopup_cust_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    autotopup_pm_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    autotopup_last_charge: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 
 # ── Token Transaction Log ─────────────────────────────────────────────
 

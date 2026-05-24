@@ -23,9 +23,13 @@ from core.credits.manager import (
     can_spend,
     get_all_usage,
     get_balance,
+    get_autotopup_settings,
+    get_spending_cap,
     get_transaction_history,
     get_usage,
     grant_tokens,
+    set_autotopup_settings,
+    set_spending_cap,
     record_spend,
     set_test_tier,
     tokens_to_dollars,
@@ -38,8 +42,11 @@ from core.credits.stripe_service import (
     create_checkout_subscription,
     create_checkout_topup,
     create_portal_session,
+    create_setup_intent,
     get_available_plans,
+    get_saved_card,
     get_subscription_status,
+    TOPUP_PACKS,
 )
 from core.credits.webhooks import handle_stripe_webhook
 from core.database.session import get_session
@@ -160,6 +167,75 @@ async def my_usage(
 ) -> dict:
     """Get your token usage summary (spend breakdown by service)."""
     return await get_usage(user.id, days=days)
+
+
+class SpendingCapRequest(BaseModel):
+    cap_tokens: float | None = Field(default=None, ge=0)
+
+
+@router.get("/api/tokens/spending-cap")
+async def my_spending_cap(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Get your monthly spending cap state (cap_tokens null = disabled)."""
+    return await get_spending_cap(user.id)
+
+
+@router.post("/api/tokens/spending-cap")
+async def set_my_spending_cap(
+    body: SpendingCapRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Set or clear (cap_tokens=null) your monthly token spending cap."""
+    return await set_spending_cap(user.id, body.cap_tokens)
+
+
+# ── Auto top-up (opt-in; server-gated by AUTOTOPUP_ENABLED) ───────────────
+
+def _autotopup_enabled() -> bool:
+    return os.environ.get("AUTOTOPUP_ENABLED", "").strip().lower() == "true"
+
+
+class AutotopupRequest(BaseModel):
+    enabled: bool | None = None
+    threshold: float | None = Field(default=None, ge=0)
+    pack: str | None = Field(default=None, max_length=32)
+
+
+async def _autotopup_payload(user_id: str) -> dict:
+    settings = await get_autotopup_settings(user_id)
+    card = await get_saved_card(user_id)
+    return {"available": True, "card": card, **settings}
+
+
+@router.get("/api/tokens/autotopup")
+async def my_autotopup(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Auto top-up settings. `available:false` when the feature flag is off."""
+    if not _autotopup_enabled():
+        return {"available": False}
+    return await _autotopup_payload(user.id)
+
+
+@router.post("/api/tokens/autotopup")
+async def set_my_autotopup(
+    body: AutotopupRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Update auto top-up settings (only provided fields change)."""
+    if not _autotopup_enabled():
+        raise HTTPException(status_code=403, detail="Auto top-up is not available")
+    if body.pack is not None and body.pack not in TOPUP_PACKS:
+        raise HTTPException(status_code=422, detail=f"Invalid pack: {body.pack}")
+    await set_autotopup_settings(
+        user.id, enabled=body.enabled, threshold=body.threshold, pack=body.pack,
+    )
+    return await _autotopup_payload(user.id)
+
+
+@router.post("/api/tokens/setup-intent")
+async def my_setup_intent(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Create a SetupIntent so the frontend can save a card for auto top-up."""
+    if not _autotopup_enabled():
+        raise HTTPException(status_code=403, detail="Auto top-up is not available")
+    return await create_setup_intent(user.id, user.email)
 
 
 # ── Stripe Purchase / Subscription Endpoints ──────────────────────────────

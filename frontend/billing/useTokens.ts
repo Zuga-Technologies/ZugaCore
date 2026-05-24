@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { api } from '../api/client'
-import type { TokenBalance, Transaction, SubscriptionInfo, Pack, Tier, UsageSummary, HistoryFilter } from './types'
+import type { TokenBalance, Transaction, SubscriptionInfo, Pack, Tier, UsageSummary, HistoryFilter, SpendingCap, AutotopupSettings } from './types'
 
 export const useTokenStore = defineStore('zugatokens', () => {
   // ── State ────────────────────────────────────────────────────────
@@ -15,6 +15,8 @@ export const useTokenStore = defineStore('zugatokens', () => {
   const purchaseError = ref<string | null>(null)
   const usage = ref<UsageSummary | null>(null)
   const historyFilter = ref<HistoryFilter>({ type: null, days: null })
+  const spendingCap = ref<SpendingCap | null>(null)
+  const autotopup = ref<AutotopupSettings>({ available: false })
 
   // ── Computed ─────────────────────────────────────────────────────
   const balancePercent = computed(() => {
@@ -61,8 +63,10 @@ export const useTokenStore = defineStore('zugatokens', () => {
     } finally {
       loading.value = false
     }
-    // Usage breakdown is non-blocking — load it after the core data.
+    // Usage breakdown + cap + auto top-up are non-blocking — load after core data.
     fetchUsage(usage.value?.period_days || 30)
+    fetchCap()
+    fetchAutotopup()
   }
 
   async function fetchUsage(days = 30) {
@@ -85,6 +89,44 @@ export const useTokenStore = defineStore('zugatokens', () => {
     } catch (e) {
       console.error('Failed to load history:', e)
     }
+  }
+
+  async function fetchCap() {
+    try {
+      spendingCap.value = await api.get<SpendingCap>('/api/tokens/spending-cap')
+    } catch (e) {
+      console.error('Failed to load spending cap:', e)
+    }
+  }
+
+  /** Set (number) or clear (null) the monthly spending cap. */
+  async function setCap(capTokens: number | null) {
+    try {
+      spendingCap.value = await api.post<SpendingCap>('/api/tokens/spending-cap', { cap_tokens: capTokens })
+      _notify()
+    } catch (e) {
+      console.error('Failed to set spending cap:', e)
+      throw e
+    }
+  }
+
+  async function fetchAutotopup() {
+    try {
+      autotopup.value = await api.get<AutotopupSettings>('/api/tokens/autotopup')
+    } catch (e) {
+      console.error('Failed to load auto top-up:', e)
+      autotopup.value = { available: false }
+    }
+  }
+
+  async function setAutotopup(patch: { enabled?: boolean; threshold?: number | null; pack?: string | null }) {
+    autotopup.value = await api.post<AutotopupSettings>('/api/tokens/autotopup', patch)
+    _notify()
+  }
+
+  /** Create a SetupIntent for saving a card. Returns the client_secret. */
+  async function createSetupIntent(): Promise<{ client_secret: string }> {
+    return api.post<{ client_secret: string }>('/api/tokens/setup-intent')
   }
 
   async function loadPacks() {
@@ -163,6 +205,8 @@ export const useTokenStore = defineStore('zugatokens', () => {
     purchaseError,
     usage,
     historyFilter,
+    spendingCap,
+    autotopup,
     // Computed
     balancePercent,
     hasBalance,
@@ -171,6 +215,11 @@ export const useTokenStore = defineStore('zugatokens', () => {
     fetchAll,
     fetchUsage,
     fetchHistory,
+    fetchCap,
+    setCap,
+    fetchAutotopup,
+    setAutotopup,
+    createSetupIntent,
     loadPacks,
     buyPack,
     subscribeTier,
