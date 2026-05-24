@@ -59,6 +59,9 @@
 
   /* ── Typography ── */
   --font-sans: 'Inter', system-ui, sans-serif;
+  /* Display face. Defaults to the body sans so non-themed surfaces are unchanged;
+     studio themes (e.g. [data-theme="life"]) may override it. Bible §6.7. */
+  --font-display: var(--font-sans);
 }
 
 /* ═══════════════════════════════════════════════
@@ -98,6 +101,11 @@ html[data-theme="life"] {
   /* Glow tint matches studio rose coral. */
   --glow-color: rgba(251, 113, 133, 0.2);
   --glow-color-wide: rgba(251, 113, 133, 0.08);
+
+  /* Wellness display face — Fraunces (soft optical serif). Body stays Inter;
+     only headings/hero pick this up via the scoped rule at end of file.
+     Sanctioned sub-brand display face, Bible §6.7 / studio-life profile. */
+  --font-display: 'Fraunces', Georgia, serif;
 }
 
 /* ═══════════════════════════════════════════════
@@ -190,4 +198,13 @@ html[data-theme="biblical"] {
   --glass-bg: rgba(34, 28, 22, 0.8);
 
   --font-sans: 'EB Garamond', 'Georgia', serif;
+}
+
+/* ═══════════════════════════════════════════════
+   Spiritus (ZugaLife) wellness display — Bible §6.7.
+   Headings + hero render in Fraunces; body stays Inter. Scoped to the life
+   theme so no other studio is affected. Tailwind text-size/weight utilities
+   set size/weight only, not font-family, so this wins without !important. */
+html[data-theme="life"] :is(h1, h2, h3) {
+  font-family: var(--font-display);
 }
