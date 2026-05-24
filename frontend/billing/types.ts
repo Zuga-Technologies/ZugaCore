@@ -35,3 +35,24 @@ export interface Tier {
   tokens_per_month: number
   price_cents: number
 }
+
+export interface UsageBucket {
+  tokens: number
+  cost_usd: number
+  calls: number
+}
+
+export interface UsageSummary {
+  user_id: string
+  period_days: number
+  total_tokens: number
+  total_usd: number
+  total_calls: number
+  by_service: Record<string, UsageBucket>
+  by_reason: Record<string, UsageBucket>
+}
+
+export interface HistoryFilter {
+  type: string | null   // transaction type: spend|purchase|subscription|grant|refund
+  days: number | null   // trailing window
+}

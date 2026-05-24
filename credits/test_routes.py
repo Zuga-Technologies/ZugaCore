@@ -126,3 +126,43 @@ def test_grant_empty_reason_rejected(client):
         headers={"X-Service-Key": _VALID_KEY},
     )
     assert resp.status_code in (400, 422), resp.text
+
+
+# ── Usage by_reason + filtered history (tokens management page) ────────────
+
+import asyncio  # noqa: E402
+
+from core.credits import manager  # noqa: E402
+
+
+def _run(coro):
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+def test_usage_includes_by_reason(session):
+    async def _seed_and_get():
+        await manager.grant_tokens("u1", 1000, reason="seed")
+        await manager.try_spend("u1", "u1@example.com", tokens=10, cost_usd=0.01,
+                                service="anthropic", reason="therapist", model="claude")
+        await manager.try_spend("u1", "u1@example.com", tokens=4, cost_usd=0.004,
+                                service="anthropic", reason="meditation", model="claude")
+        return await manager.get_usage("u1", days=30)
+
+    usage = _run(_seed_and_get())
+    assert "by_reason" in usage
+    assert usage["by_reason"]["therapist"]["tokens"] == 10
+    assert usage["by_reason"]["meditation"]["tokens"] == 4
+
+
+def test_history_filters_by_type(session):
+    async def _seed_and_get():
+        await manager.grant_tokens("u1", 1000, reason="seed")
+        await manager.try_spend("u1", "u1@example.com", tokens=5, cost_usd=0.0,
+                                service="anthropic", reason="therapist", model="m")
+        spends = await manager.get_transaction_history("u1", limit=50, type_filter="spend")
+        grants = await manager.get_transaction_history("u1", limit=50, type_filter="grant")
+        return spends, grants
+
+    spends, grants = _run(_seed_and_get())
+    assert len(spends) == 1 and all(t["type"] == "spend" for t in spends)
+    assert len(grants) >= 1 and all(t["type"] == "grant" for t in grants)

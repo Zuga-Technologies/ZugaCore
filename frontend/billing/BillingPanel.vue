@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import { useTokenStore } from './useTokens'
-import { txTypeLabel, formatDate, formatReason } from './helpers'
+import { txTypeLabel, formatDate } from './helpers'
+import { reasonMeta } from './reasonMap'
 import {
   Coins, ShoppingCart, CreditCard, TrendingDown, TrendingUp,
-  Gift, Zap, Clock, Infinity, X,
+  Gift, Zap, Clock, Infinity, X, Download, PieChart,
 } from 'lucide-vue-next'
 
 const props = withDefaults(defineProps<{
@@ -31,6 +32,71 @@ const txTypeIcon: Record<string, any> = {
 function openPurchase() {
   store.loadPacks()
   showPurchaseModal.value = true
+}
+
+// ── Usage breakdown ("where your tokens go") ────────────────────────────
+const usageDays = ref(30)
+const RANGE_OPTIONS = [
+  { label: '7d', days: 7 },
+  { label: '30d', days: 30 },
+  { label: '90d', days: 90 },
+]
+
+/** by_reason map → sorted rows with a relative bar width. */
+const usageRows = computed(() => {
+  const by = store.usage?.by_reason
+  if (!by) return [] as Array<{ key: string; label: string; color: string; tokens: number; pct: number }>
+  const rows = Object.entries(by)
+    .map(([key, b]) => ({ key, ...reasonMeta(key), tokens: Math.round(b.tokens) }))
+    .filter(r => r.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+  const max = rows.length ? rows[0].tokens : 1
+  return rows.map(r => ({ ...r, pct: max > 0 ? (r.tokens / max) * 100 : 0 }))
+})
+
+function setUsageDays(days: number) {
+  usageDays.value = days
+  store.fetchUsage(days)
+}
+
+// ── History filter + CSV export ─────────────────────────────────────────
+const TYPE_OPTIONS = [
+  { label: 'All activity', value: '' },
+  { label: 'Used', value: 'spend' },
+  { label: 'Purchased', value: 'purchase' },
+  { label: 'Subscription', value: 'subscription' },
+  { label: 'Bonus / Grant', value: 'grant' },
+  { label: 'Refund', value: 'refund' },
+]
+const filterType = ref('')
+const filterDays = ref(0)
+
+function applyFilters() {
+  store.fetchHistory({
+    type: filterType.value || null,
+    days: filterDays.value || null,
+  })
+}
+
+function exportCsv() {
+  const rows = store.transactions
+  const header = ['Date', 'Type', 'Reason', 'Amount', 'Balance after']
+  const esc = (v: string) => `"${String(v).replace(/"/g, '""')}"`
+  const lines = rows.map(tx => [
+    tx.created_at || '',
+    txTypeLabel[tx.type] || tx.type,
+    reasonMeta(tx.reason).label,
+    String(Math.round(tx.amount)),
+    tx.balance_after != null ? String(Math.round(tx.balance_after)) : '',
+  ].map(esc).join(','))
+  const csv = [header.map(esc).join(','), ...lines].join('\r\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `zugatokens-history-${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 onMounted(() => store.fetchAll())
@@ -143,13 +209,61 @@ onMounted(() => store.fetchAll())
       </div>
     </section>
 
+    <!-- ── Usage breakdown — where your tokens go ───────────────────────── -->
+    <section v-if="showHistory && usageRows.length" class="bp-card bp-usage">
+      <header class="bp-card-header">
+        <h2 class="bp-card-title">
+          <PieChart :size="15" :stroke-width="2" class="bp-card-title-icon" />
+          Where your tokens go
+        </h2>
+        <div class="bp-range">
+          <button
+            v-for="opt in RANGE_OPTIONS"
+            :key="opt.days"
+            class="bp-range-btn"
+            :class="{ 'bp-range-active': usageDays === opt.days }"
+            @click="setUsageDays(opt.days)"
+          >{{ opt.label }}</button>
+        </div>
+      </header>
+      <ul class="bp-usage-list">
+        <li v-for="row in usageRows" :key="row.key" class="bp-usage-row">
+          <div class="bp-usage-head">
+            <span class="bp-usage-dot" :style="{ background: row.color }" />
+            <span class="bp-usage-label">{{ row.label }}</span>
+            <span class="bp-usage-num">{{ row.tokens.toLocaleString() }}</span>
+          </div>
+          <div class="bp-usage-track">
+            <div class="bp-usage-fill" :style="{ width: row.pct + '%', background: row.color }" />
+          </div>
+        </li>
+      </ul>
+    </section>
+
     <!-- ── Transaction history ──────────────────────────────────────────── -->
     <section v-if="showHistory" class="bp-card bp-history">
-      <header class="bp-card-header">
+      <header class="bp-card-header bp-history-header">
         <h2 class="bp-card-title">Recent activity</h2>
-        <span v-if="store.transactions.length" class="bp-card-meta">
-          {{ store.transactions.length }} transaction{{ store.transactions.length === 1 ? '' : 's' }}
-        </span>
+        <div class="bp-history-controls">
+          <select v-model="filterType" class="bp-filter-select" aria-label="Filter by type" @change="applyFilters">
+            <option v-for="o in TYPE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+          <select v-model.number="filterDays" class="bp-filter-select" aria-label="Filter by date" @change="applyFilters">
+            <option :value="0">All time</option>
+            <option :value="30">Last 30 days</option>
+            <option :value="90">Last 90 days</option>
+            <option :value="365">Last year</option>
+          </select>
+          <button
+            class="bp-export-btn"
+            :disabled="!store.transactions.length"
+            title="Export visible activity as CSV"
+            @click="exportCsv"
+          >
+            <Download :size="13" :stroke-width="2" />
+            CSV
+          </button>
+        </div>
       </header>
 
       <div v-if="store.transactions.length === 0" class="bp-empty">
@@ -172,7 +286,10 @@ onMounted(() => store.fetchAll())
           </div>
           <div class="bp-tx-body">
             <p class="bp-tx-label">{{ txTypeLabel[tx.type] || tx.type }}</p>
-            <p v-if="tx.reason" class="bp-tx-reason">{{ formatReason(tx.reason) }}</p>
+            <p v-if="tx.reason" class="bp-tx-reason">
+              <span class="bp-tx-reason-dot" :style="{ background: reasonMeta(tx.reason).color }" />
+              {{ reasonMeta(tx.reason).label }}
+            </p>
           </div>
           <div class="bp-tx-amount-block">
             <p
@@ -517,8 +634,85 @@ onMounted(() => store.fetchAll())
   font-weight: 500;
 }
 
+/* ── Usage breakdown ─────────────────────────────────────── */
+.bp-usage { padding: 0; }
+.bp-card-title-icon { vertical-align: -2px; margin-right: 0.375rem; color: var(--text-tertiary, #737373); }
+.bp-range { display: inline-flex; gap: 0.25rem; }
+.bp-range-btn {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle, #262626);
+  background: transparent;
+  color: var(--text-tertiary, #737373);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 150ms ease;
+}
+.bp-range-btn:hover { color: var(--text-secondary, #a3a3a3); border-color: var(--border-default, #404040); }
+.bp-range-active {
+  color: var(--accent-fg, #0a0a0a);
+  background: var(--accent-brand, #a3e635);
+  border-color: var(--accent-brand, #a3e635);
+}
+.bp-usage-list { list-style: none; margin: 0; padding: 1rem 1.5rem 1.25rem; display: flex; flex-direction: column; gap: 0.875rem; }
+.bp-usage-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem; }
+.bp-usage-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.bp-usage-label { font-size: 0.8125rem; color: var(--text-secondary, #a3a3a3); }
+.bp-usage-num {
+  margin-left: auto;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--text-primary, #e7e5e4);
+  font-variant-numeric: tabular-nums;
+}
+.bp-usage-track { height: 6px; border-radius: 999px; background: oklch(0.13 0.005 280); overflow: hidden; }
+.bp-usage-fill { height: 100%; border-radius: 999px; transition: width 500ms cubic-bezier(0.2, 0, 0, 1); }
+
 /* ── History ─────────────────────────────────────────────── */
 .bp-history { padding: 0; }
+.bp-history-header { flex-wrap: wrap; gap: 0.625rem; }
+.bp-history-controls { display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.bp-filter-select {
+  font-size: 0.75rem;
+  font-family: inherit;
+  padding: 0.3125rem 0.5rem;
+  border-radius: 7px;
+  border: 1px solid var(--border-subtle, #262626);
+  background: oklch(0.21 0.009 280);
+  color: var(--text-secondary, #a3a3a3);
+  cursor: pointer;
+}
+.bp-filter-select:hover { border-color: var(--border-default, #404040); }
+.bp-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 0.3125rem 0.625rem;
+  border-radius: 7px;
+  border: 1px solid var(--border-subtle, #262626);
+  background: transparent;
+  color: var(--text-tertiary, #737373);
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+.bp-export-btn:hover:not(:disabled) {
+  border-color: var(--accent-brand, #a3e635);
+  color: var(--accent-brand, #a3e635);
+  background: rgba(163, 230, 53, 0.06);
+}
+.bp-export-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.bp-tx-reason-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  margin-right: 0.375rem;
+  vertical-align: 1px;
+}
 .bp-card-header {
   display: flex;
   align-items: baseline;

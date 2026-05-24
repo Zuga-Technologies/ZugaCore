@@ -731,6 +731,25 @@ async def get_usage(user_id: str, days: int = 30) -> dict:
             for row in breakdown_result.all()
         }
 
+        # Breakdown by reason (feature/studio) — studio identity is encoded in
+        # the free-text reason ("therapist", "gamer_overlay", ...). Powers the
+        # "where your tokens go" card on the tokens management page.
+        reason_result = await session.execute(
+            select(
+                CreditLedger.reason,
+                func.coalesce(func.sum(CreditLedger.tokens_charged), 0),
+                func.sum(CreditLedger.cost_usd),
+                func.count(CreditLedger.id),
+            ).where(
+                CreditLedger.user_id == user_id,
+                CreditLedger.created_at >= cutoff,
+            ).group_by(CreditLedger.reason)
+        )
+        reason_breakdown = {
+            (row[0] or "other"): {"tokens": row[1], "cost_usd": row[2], "calls": row[3]}
+            for row in reason_result.all()
+        }
+
     return {
         "user_id": user_id,
         "period_days": days,
@@ -738,6 +757,7 @@ async def get_usage(user_id: str, days: int = 30) -> dict:
         "total_usd": total_usd,
         "total_calls": call_count,
         "by_service": breakdown,
+        "by_reason": reason_breakdown,
     }
 
 
@@ -768,15 +788,31 @@ async def get_all_usage(days: int = 30) -> list[dict]:
         ]
 
 
-async def get_transaction_history(user_id: str, limit: int = 50) -> list[dict]:
-    """Get recent token transactions for a user."""
+async def get_transaction_history(
+    user_id: str,
+    limit: int = 50,
+    type_filter: str | None = None,
+    reason_filter: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> list[dict]:
+    """Get recent token transactions for a user, optionally filtered.
+
+    Filters: by transaction `type` (spend/purchase/...), by `reason`
+    (feature/studio key), and by a [date_from, date_to) created_at window.
+    """
     async with get_session() as session:
-        result = await session.execute(
-            select(TokenTransaction)
-            .where(TokenTransaction.user_id == user_id)
-            .order_by(TokenTransaction.created_at.desc())
-            .limit(limit)
-        )
+        stmt = select(TokenTransaction).where(TokenTransaction.user_id == user_id)
+        if type_filter:
+            stmt = stmt.where(TokenTransaction.type == type_filter)
+        if reason_filter:
+            stmt = stmt.where(TokenTransaction.reason == reason_filter)
+        if date_from:
+            stmt = stmt.where(TokenTransaction.created_at >= date_from)
+        if date_to:
+            stmt = stmt.where(TokenTransaction.created_at < date_to)
+        stmt = stmt.order_by(TokenTransaction.created_at.desc()).limit(limit)
+        result = await session.execute(stmt)
         transactions = result.scalars().all()
 
         return [

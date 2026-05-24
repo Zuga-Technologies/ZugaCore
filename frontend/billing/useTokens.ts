@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { api } from '../api/client'
-import type { TokenBalance, Transaction, SubscriptionInfo, Pack, Tier } from './types'
+import type { TokenBalance, Transaction, SubscriptionInfo, Pack, Tier, UsageSummary, HistoryFilter } from './types'
 
 export const useTokenStore = defineStore('zugatokens', () => {
   // ── State ────────────────────────────────────────────────────────
@@ -13,6 +13,8 @@ export const useTokenStore = defineStore('zugatokens', () => {
   const loading = ref(false)
   const purchaseLoading = ref<string | null>(null)
   const purchaseError = ref<string | null>(null)
+  const usage = ref<UsageSummary | null>(null)
+  const historyFilter = ref<HistoryFilter>({ type: null, days: null })
 
   // ── Computed ─────────────────────────────────────────────────────
   const balancePercent = computed(() => {
@@ -58,6 +60,30 @@ export const useTokenStore = defineStore('zugatokens', () => {
       console.error('Failed to load token data:', e)
     } finally {
       loading.value = false
+    }
+    // Usage breakdown is non-blocking — load it after the core data.
+    fetchUsage(usage.value?.period_days || 30)
+  }
+
+  async function fetchUsage(days = 30) {
+    try {
+      usage.value = await api.get<UsageSummary>(`/api/tokens/usage?days=${days}`)
+    } catch (e) {
+      console.error('Failed to load token usage:', e)
+    }
+  }
+
+  /** Re-fetch the transaction list honoring the current historyFilter. */
+  async function fetchHistory(filter?: Partial<HistoryFilter>) {
+    if (filter) historyFilter.value = { ...historyFilter.value, ...filter }
+    const params = new URLSearchParams({ limit: '200' })
+    if (historyFilter.value.type) params.set('type', historyFilter.value.type)
+    if (historyFilter.value.days) params.set('days', String(historyFilter.value.days))
+    try {
+      const data = await api.get<{ transactions: Transaction[] }>(`/api/tokens/history?${params}`)
+      transactions.value = data.transactions
+    } catch (e) {
+      console.error('Failed to load history:', e)
     }
   }
 
@@ -135,12 +161,16 @@ export const useTokenStore = defineStore('zugatokens', () => {
     loading,
     purchaseLoading,
     purchaseError,
+    usage,
+    historyFilter,
     // Computed
     balancePercent,
     hasBalance,
     // Actions
     fetchBalance,
     fetchAll,
+    fetchUsage,
+    fetchHistory,
     loadPacks,
     buyPack,
     subscribeTier,

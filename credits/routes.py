@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -132,10 +133,23 @@ async def gamer_balance(request: Request) -> dict:
 @router.get("/api/tokens/history")
 async def my_history(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    type: Annotated[str | None, Query(max_length=32)] = None,
+    reason: Annotated[str | None, Query(max_length=255)] = None,
+    days: Annotated[int | None, Query(ge=1, le=365)] = None,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """Get your recent token transaction history."""
-    transactions = await get_transaction_history(user.id, limit=limit)
+    """Get your recent token transaction history, optionally filtered by
+    transaction type, reason (feature/studio), and a trailing day window."""
+    date_from = (
+        datetime.now(timezone.utc) - timedelta(days=days) if days else None
+    )
+    transactions = await get_transaction_history(
+        user.id,
+        limit=limit,
+        type_filter=type,
+        reason_filter=reason,
+        date_from=date_from,
+    )
     return {"transactions": transactions}
 
 
