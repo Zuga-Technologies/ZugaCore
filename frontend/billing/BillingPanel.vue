@@ -305,8 +305,9 @@ onMounted(() => store.fetchAll())
       </div>
     </section>
 
-    <!-- ── Settings + insights grid (2-col on desktop, 1-col on mobile) ─── -->
-    <div v-if="showHistory" class="bp-grid">
+    <!-- ── Desktop dashboard: history (left, wide) + controls (right) ────── -->
+    <div v-if="showHistory" class="bp-cols">
+    <div class="bp-col-side">
 
     <!-- ── Monthly spending cap ─────────────────────────────────────────── -->
     <section v-if="!store.balance.is_unlimited" class="bp-card bp-cap">
@@ -434,10 +435,11 @@ onMounted(() => store.fetchAll())
       </ul>
     </section>
 
-    </div><!-- /bp-grid -->
+    </div><!-- /bp-col-side -->
 
+    <div class="bp-col-main">
     <!-- ── Transaction history ──────────────────────────────────────────── -->
-    <section v-if="showHistory" class="bp-card bp-history">
+    <section class="bp-card bp-history">
       <header class="bp-card-header bp-history-header">
         <h2 class="bp-card-title">Recent activity</h2>
         <div class="bp-history-controls">
@@ -499,6 +501,8 @@ onMounted(() => store.fetchAll())
         </li>
       </ul>
     </section>
+    </div><!-- /bp-col-main -->
+    </div><!-- /bp-cols -->
 
   </template>
 
@@ -830,18 +834,24 @@ onMounted(() => store.fetchAll())
   font-weight: 500;
 }
 
-/* ── Settings + insights grid ────────────────────────────── */
-.bp-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 1.5rem;
-  margin-bottom: 1.5rem;
-}
-.bp-grid > .bp-card { margin-bottom: 0; height: 100%; }
+/* ── Desktop dashboard columns ───────────────────────────── */
+/* Mobile: single column, source order = controls (side) then history (main).
+   Desktop (>=1024): history fills a wide left column, controls/insights sit
+   in a narrower right column, so the Spiritus-width (1600px) frame reads as a
+   deliberate dashboard rather than a stretched ribbon. */
+.bp-cols { display: flex; flex-direction: column; gap: 1.5rem; }
+.bp-col-side { display: flex; flex-direction: column; gap: 1.5rem; }
+.bp-col-side > .bp-card { margin-bottom: 0; }
+.bp-col-main > .bp-card { margin-bottom: 0; }
 @media (min-width: 1024px) {
-  /* auto-fit collapses empty tracks, so a lone card fills the row while two
-     cards split it — robust to the conditional auto-top-up / usage cards. */
-  .bp-grid { grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); align-items: start; }
+  .bp-cols {
+    display: grid;
+    grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 1.75rem;
+  }
+  .bp-col-main { order: 0; }   /* left, wide */
+  .bp-col-side { order: 1; }   /* right, narrow */
 }
 
 /* ── Spending cap ────────────────────────────────────────── */
