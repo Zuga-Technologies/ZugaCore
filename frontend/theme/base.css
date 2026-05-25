@@ -3,6 +3,13 @@
     @apply bg-surface-0 text-txt-primary font-sans antialiased;
   }
 
+  /* Headings render in the display face (Sora app-wide; studio themes may
+     override --font-display, e.g. Fraunces under [data-theme="life"]). Body
+     stays --font-sans (Inter). */
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+  }
+
   /* Slim dark scrollbar */
   ::-webkit-scrollbar {
     width: 6px;
