@@ -37,6 +37,28 @@ async def get_current_user(request: Request) -> CurrentUser:
     return user
 
 
+async def get_current_user_optional(request: Request) -> CurrentUser | None:
+    """Like get_current_user but returns None instead of raising 401.
+
+    Use for endpoints that support both authenticated and anonymous callers.
+    Never grants elevated privilege on None — the caller is responsible for
+    failing safe (treat None as the lowest privilege level).
+    """
+    auth_header = request.headers.get("Authorization")
+
+    # Fallback: accept token as query param (for <video>/<a> elements that can't send headers)
+    if not auth_header:
+        query_token = request.query_params.get("token")
+        if query_token:
+            auth_header = f"Bearer {query_token}"
+
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+
+    token = auth_header.removeprefix("Bearer ")
+    return await _validate_token(token)
+
+
 async def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     """Require the current user to be an admin."""
 
