@@ -59,9 +59,10 @@
 
   /* ── Typography ── */
   --font-sans: 'Inter', system-ui, sans-serif;
-  /* Display face = Sora (Operator decision). Body stays Inter; headings/wordmark
-     render in Sora. Studio themes (e.g. [data-theme="life"]) may override. */
-  --font-display: 'Sora', 'Inter', system-ui, sans-serif;
+  /* Display face = Manrope (Operator 2026-05-25, swapped from Sora for a cleaner Y).
+     Body stays Inter; headings/wordmark render in Manrope. Studio themes
+     (e.g. [data-theme="life"]) may override. */
+  --font-display: 'Manrope', 'Inter', system-ui, sans-serif;
 }
 
 /* ═══════════════════════════════════════════════
