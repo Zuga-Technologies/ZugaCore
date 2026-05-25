@@ -75,7 +75,11 @@ const onLeave = () => {
   position: relative;
   min-height: 2px;
   border-radius: 4px 4px 2px 2px;
-  background: rgba(var(--accent), 0.18);
+  /* --accent is a space-separated RGB triplet, so the rest state needs the
+     modern rgb(... / a) form. The old rgba(var(--accent), 0.18) was invalid
+     with a triplet, dropping the background — bars were invisible until hover
+     (where rgb(var(--accent)) is valid) lit them up. */
+  background: rgb(var(--accent) / 0.18);
   outline: none;
   cursor: pointer;
   transition:
