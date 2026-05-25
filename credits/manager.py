@@ -33,6 +33,11 @@ from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
 
+
+class InsufficientTokensError(Exception):
+    """Raised when a wallet can't cover a requested debit (maps to HTTP 402)."""
+
+
 # TOCTOU race protection for try_spend lives at the DB layer via
 # SELECT ... FOR UPDATE (see _get_or_create_balance(for_update=True)).
 # Postgres enforces a row lock that holds across all worker processes;
@@ -621,6 +626,96 @@ async def grant_tokens(
 
     logger.info("Granted %s tokens to user %s (reason: %s)", tokens, user_id, reason)
     return {"tokens_granted": tokens, "new_total": total}
+
+
+async def transfer_tokens(
+    *,
+    session,
+    buyer_id: str,
+    seller_id: str,
+    amount: int,
+    creator_cut: int,
+    platform_cut: int,
+    reason: str = "forge_purchase",
+) -> dict:
+    """Move tokens from buyer to seller atomically, WITHIN the caller's session.
+
+    Debits ``amount`` from the buyer (priority-order buckets), credits
+    ``creator_cut`` to the seller's purchased bucket, and writes both ledger rows.
+    ``platform_cut`` is Zuga's take — it leaves user circulation (recorded by the
+    caller in the ForgePurchase row), it is deliberately NOT credited to any wallet.
+    Total user-wallet supply therefore drops by exactly ``platform_cut``; nothing
+    else is created or destroyed.
+
+    Unlike try_spend / grant_tokens, this does NOT open its own session — it runs
+    inside the caller's transaction so the wallet move, the ForgePurchase row, and
+    the access grant all commit or roll back together (the atomicity invariant).
+
+    Raises InsufficientTokensError if the buyer can't cover ``amount``; the caller's
+    transaction then rolls back, so nothing moves. Admins are NOT exempt: a real
+    transfer must occur or the seller would be paid with minted tokens.
+    """
+    if amount <= 0:
+        raise ValueError(f"amount must be positive, got {amount}")
+    if creator_cut + platform_cut != amount:
+        raise ValueError(
+            f"split must sum to amount: {creator_cut} + {platform_cut} != {amount}"
+        )
+    if buyer_id == seller_id:
+        raise ValueError("buyer and seller must differ")
+
+    buyer = await _get_or_create_balance(session, buyer_id, for_update=True)
+    buyer_total = (
+        buyer.free_tokens + buyer.sub_tokens
+        + buyer.sub_rollover + buyer.purchased_tokens
+    )
+    if buyer_total < amount:
+        raise InsufficientTokensError(
+            f"buyer {buyer_id} has {buyer_total:.0f}, needs {amount}"
+        )
+
+    deductions = await _deduct_tokens(session, buyer, amount, reason)
+    buyer_after = (
+        buyer.free_tokens + buyer.sub_tokens
+        + buyer.sub_rollover + buyer.purchased_tokens
+    )
+    session.add(TokenTransaction(
+        user_id=buyer_id,
+        type="spend",
+        amount=-amount,
+        source=deductions[0]["source"] if deductions else "unknown",
+        reason=reason,
+        balance_after=buyer_after,
+    ))
+
+    seller = await _get_or_create_balance(session, seller_id)
+    seller.purchased_tokens += creator_cut
+    seller_after = (
+        seller.free_tokens + seller.sub_tokens
+        + seller.sub_rollover + seller.purchased_tokens
+    )
+    session.add(TokenTransaction(
+        user_id=seller_id,
+        type="grant",
+        amount=creator_cut,
+        source="purchased",
+        reason=f"{reason}_sale",
+        balance_after=seller_after,
+    ))
+
+    logger.info(
+        "Token transfer: buyer=%s -%d -> seller=%s +%d (platform +%d) reason=%s",
+        buyer_id, amount, seller_id, creator_cut, platform_cut, reason,
+    )
+    return {
+        "buyer_id": buyer_id,
+        "seller_id": seller_id,
+        "amount": amount,
+        "creator_cut": creator_cut,
+        "platform_cut": platform_cut,
+        "buyer_balance_after": buyer_after,
+        "seller_balance_after": seller_after,
+    }
 
 
 async def get_spending_cap(user_id: str) -> dict:
