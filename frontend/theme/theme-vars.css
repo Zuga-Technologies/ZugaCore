@@ -59,9 +59,9 @@
 
   /* ── Typography ── */
   --font-sans: 'Inter', system-ui, sans-serif;
-  /* Display face. Defaults to the body sans so non-themed surfaces are unchanged;
-     studio themes (e.g. [data-theme="life"]) may override it. Bible §6.7. */
-  --font-display: var(--font-sans);
+  /* Display face = Sora (Operator decision). Body stays Inter; headings/wordmark
+     render in Sora. Studio themes (e.g. [data-theme="life"]) may override. */
+  --font-display: 'Sora', 'Inter', system-ui, sans-serif;
 }
 
 /* ═══════════════════════════════════════════════
