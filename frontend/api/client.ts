@@ -101,18 +101,44 @@ async function rawFetch(method: string, path: string, body: unknown, token: stri
   })
 }
 
+// Mobile browsers kill in-flight fetches when the tab is backgrounded. The
+// promise rejects with TypeError ("Failed to fetch" / "network error") on
+// resume. Wait until the tab is visible again, then replay once.
+function waitForVisible(): Promise<void> {
+  if (typeof document === 'undefined' || !document.hidden) return Promise.resolve()
+  return new Promise(resolve => {
+    const onVis = () => {
+      if (!document.hidden) {
+        document.removeEventListener('visibilitychange', onVis)
+        resolve()
+      }
+    }
+    document.addEventListener('visibilitychange', onVis)
+  })
+}
+
+async function fetchWithResumeRetry(method: string, path: string, body: unknown, token: string | null): Promise<Response> {
+  try {
+    return await rawFetch(method, path, body, token)
+  } catch (err) {
+    if (!(err instanceof TypeError)) throw err
+    await waitForVisible()
+    return rawFetch(method, path, body, token)
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   // Don't refresh-and-retry the refresh endpoint itself — would infinite loop.
   const isRefreshCall = path === '/api/auth/session/refresh'
   let token = getToken()
-  let res = await rawFetch(method, path, body, token)
+  let res = await fetchWithResumeRetry(method, path, body, token)
 
   if (res.status === 401 && token && !isRefreshCall) {
     const newToken = await tryRefresh()
     if (newToken) {
       // Retry once with fresh token.
       token = newToken
-      res = await rawFetch(method, path, body, token)
+      res = await fetchWithResumeRetry(method, path, body, token)
     }
     // Still 401 after refresh? Session is genuinely dead — clear and redirect.
     if (res.status === 401) {
