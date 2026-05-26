@@ -612,7 +612,12 @@ async def refresh_session_endpoint(body: RefreshRequest, request: Request) -> Re
         # UnauthorisedError, TokenTheftError, or transport error — treat all
         # as "please log in again." We never surface SuperTokens internals to
         # the client, and we don't rotate on failure.
-        logger.info("refresh failed for %s: %s", client_ip, exc)
+        # Log class + repr at WARNING so the next phone-bounce shows up in
+        # Railway logs and we can tell theft from expiry from transport.
+        logger.warning(
+            "[refresh-401] ip=%s exc_class=%s repr=%r",
+            client_ip, exc.__class__.__name__, exc,
+        )
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
     tokens = session.get_all_session_tokens_dangerously()
