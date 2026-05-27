@@ -55,12 +55,20 @@ export async function tryRefresh(): Promise<string | null> {
   if (!refreshToken) return null
 
   inFlightRefresh = (async () => {
+    const doFetch = () => fetch('/api/auth/session/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    })
     try {
-      const res = await fetch('/api/auth/session/refresh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      })
+      let res: Response
+      try {
+        res = await doFetch()
+      } catch (err) {
+        if (!(err instanceof TypeError)) throw err
+        await waitForVisible()
+        res = await doFetch()
+      }
       if (!res.ok) return null
       const body = await res.json() as { token: string; refresh_token: string }
       setSession(body.token, body.refresh_token)
