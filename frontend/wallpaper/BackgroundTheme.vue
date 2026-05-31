@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick, computed, defineAsyncComponent, shallowRef } from 'vue'
 import { api } from '@core/api/client'
+import { isGpuLite } from '@core/utils/graphicsCapability'
 import {
   type ThemeId,
   getSavedTheme,
@@ -180,6 +181,15 @@ function stopUserTheme() {
 const prefersReducedMotion = ref(false)
 let motionQuery: MediaQueryList | null = null
 
+// gpu-lite: no hardware acceleration (or reduced-motion / low-core). Detected
+// once at boot. When lite, freeze the wallpaper to a static gradient/poster —
+// a looping video or RAF particle canvas re-composites the full screen every
+// frame and tanks a no-accel machine, the same combo gpu-lite.css de-blurs.
+const gpuLite = isGpuLite()
+// `lite` = "don't run animated wallpaper layers". prefersReducedMotion is the
+// reactive half (can change at runtime); gpuLite is fixed for the session.
+const lite = computed(() => prefersReducedMotion.value || gpuLite)
+
 onMounted(() => {
   motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
   prefersReducedMotion.value = motionQuery.matches
@@ -358,7 +368,7 @@ watch(currentTheme, (id) => {
     stopAIAmbient()
     stopUserTheme()
     const t = getTheme(id as ThemeId)
-    if (t.video && !prefersReducedMotion.value) {
+    if (t.video && !lite.value) {
       loadVideo(t.video)
     }
   }
@@ -367,7 +377,7 @@ watch(currentTheme, (id) => {
 // Initial load — watch videoA ref to ensure the element exists in DOM before loading
 // (v-if="hasVideo" means the <video> may not be rendered on first onMounted tick)
 watch(videoA, (el) => {
-  if (el && theme.value.video && !prefersReducedMotion.value && !videoLoaded.value) {
+  if (el && theme.value.video && !lite.value && !videoLoaded.value) {
     loadVideo(theme.value.video)
   }
 })
@@ -379,7 +389,7 @@ onMounted(() => {
     startAIAmbient()
   } else if (currentTheme.value === 'custom') {
     loadCustomVideo()
-  } else if (theme.value.video && !prefersReducedMotion.value && videoA.value) {
+  } else if (theme.value.video && !lite.value && videoA.value) {
     loadVideo(theme.value.video)
   }
 })
@@ -408,9 +418,11 @@ onUnmounted(() => document.removeEventListener('zugalife-theme-change', handleTh
       }"
     />
 
-    <!-- Interactive scene wallpaper (Wallpaper-Engine style) -->
+    <!-- Interactive scene wallpaper (Wallpaper-Engine style) — skipped under
+         gpu-lite: an RAF particle canvas re-paints full-screen every frame and
+         tanks a no-accel machine. The base gradient layer above stands in. -->
     <component
-      v-if="isScene && sceneComponent"
+      v-if="isScene && sceneComponent && !lite"
       :is="sceneComponent"
       :key="currentTheme"
     />
@@ -420,8 +432,16 @@ onUnmounted(() => document.removeEventListener('zugalife-theme-change', handleTh
       :style="{ background: `rgba(0, 0, 0, ${theme.overlay})` }"
     />
 
+    <!-- Static poster stand-in for video themes when motion is suppressed
+         (reduced-motion or gpu-lite) — a still frame instead of a looping video. -->
+    <div
+      v-if="hasVideo && lite && theme.poster"
+      class="absolute inset-0 bg-cover bg-center bg-no-repeat"
+      :style="{ backgroundImage: `url(${theme.poster})` }"
+    />
+
     <!-- Preset video layers (A and B for crossfade) -->
-    <template v-if="hasVideo && !isCustomVideo && !prefersReducedMotion">
+    <template v-if="hasVideo && !isCustomVideo && !lite">
       <video
         ref="videoA"
         class="absolute inset-0 w-full h-full object-cover transition-opacity duration-[1500ms] will-change-[opacity]"
@@ -531,7 +551,7 @@ onUnmounted(() => document.removeEventListener('zugalife-theme-change', handleTh
     />
 
     <!-- Custom Video -->
-    <template v-if="isCustomVideo && customVideoSrc && !prefersReducedMotion">
+    <template v-if="isCustomVideo && customVideoSrc && !lite">
       <video
         ref="customVideoRef"
         :src="customVideoSrc"
