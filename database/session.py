@@ -1,6 +1,7 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from core.database.base import Base
@@ -19,6 +20,15 @@ def init_engine(database_url: str, echo: bool = False) -> None:
     """
     global _engine, _async_session
     _engine = create_async_engine(database_url, echo=echo)
+    # SQLite does NOT enforce foreign keys (and thus ON DELETE CASCADE / SET NULL)
+    # unless `PRAGMA foreign_keys=ON` is set per-connection. Without this, deleting a
+    # parent row silently orphans its children. Enable it for every SQLite connection.
+    if database_url.startswith("sqlite"):
+        @event.listens_for(_engine.sync_engine, "connect")
+        def _enable_sqlite_fk(dbapi_connection, _connection_record):  # type: ignore[no-untyped-def]
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
     _async_session = async_sessionmaker(
         _engine,
         class_=AsyncSession,
