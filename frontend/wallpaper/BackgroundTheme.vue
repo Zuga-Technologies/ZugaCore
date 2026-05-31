@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick, computed, defineAsyncComponent, shallowRef } from 'vue'
 import { api } from '@core/api/client'
-import { isGpuLite } from '@core/utils/graphicsCapability'
+import { isGpuLite, GPU_OVERRIDE_EVENT } from '@core/utils/graphicsCapability'
 import {
   type ThemeId,
   getSavedTheme,
@@ -185,10 +185,15 @@ let motionQuery: MediaQueryList | null = null
 // once at boot. When lite, freeze the wallpaper to a static gradient/poster —
 // a looping video or RAF particle canvas re-composites the full screen every
 // frame and tanks a no-accel machine, the same combo gpu-lite.css de-blurs.
-const gpuLite = isGpuLite()
-// `lite` = "don't run animated wallpaper layers". prefersReducedMotion is the
-// reactive half (can change at runtime); gpuLite is fixed for the session.
-const lite = computed(() => prefersReducedMotion.value || gpuLite)
+// gpuLite is a ref (not a const) so the Settings "force full effects" toggle can
+// flip it live via the GPU_OVERRIDE_EVENT — no reload needed.
+const gpuLite = ref(isGpuLite())
+// `lite` = "don't run animated wallpaper layers". Both halves are reactive:
+// prefersReducedMotion (OS setting) and gpuLite (detection + user override).
+const lite = computed(() => prefersReducedMotion.value || gpuLite.value)
+function onGpuOverride() { gpuLite.value = isGpuLite() }
+onMounted(() => window.addEventListener(GPU_OVERRIDE_EVENT, onGpuOverride))
+onUnmounted(() => window.removeEventListener(GPU_OVERRIDE_EVENT, onGpuOverride))
 
 onMounted(() => {
   motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')

@@ -28,6 +28,22 @@ export interface GraphicsCapability {
 
 const SOFTWARE_RENDERER = /swiftshader|llvmpipe|software|basic\s*render|microsoft\s*basic|softpipe|mesa\s+offscreen/i
 
+// User override (Settings → Appearance → "Force full effects"). When set, the
+// animated wallpaper + backdrop blur stay ON regardless of detection — for the
+// rare user with a capable GPU who manually disabled browser acceleration.
+const FORCE_FULL_KEY = 'zugaapp:force-full-effects'
+/** Fired when the override flips so live components (BackgroundTheme) can react
+ *  without a reload. */
+export const GPU_OVERRIDE_EVENT = 'zuga:gpu-effects-override'
+
+export function getForceFullEffects(): boolean {
+  try {
+    return localStorage.getItem(FORCE_FULL_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 let cached: GraphicsCapability | null = null
 
 /** Read the unmasked GPU renderer string, or '' if WebGL is unavailable. */
@@ -84,9 +100,15 @@ export function detectGraphicsCapability(): GraphicsCapability {
     navigator.hardwareConcurrency > 0 &&
     navigator.hardwareConcurrency <= 2
 
-  const lite = !accelerated || reducedMotion || lowCore
+  let lite = !accelerated || reducedMotion || lowCore
   if (lite && reason === 'accelerated') {
     reason = reducedMotion ? 'prefers-reduced-motion' : 'low-core'
+  }
+
+  // User override wins: force full effects on regardless of what we detected.
+  if (lite && getForceFullEffects()) {
+    lite = false
+    reason = `forced-full-effects(was:${reason})`
   }
 
   cached = { accelerated, lite, renderer, reason }
@@ -105,6 +127,25 @@ export function applyGraphicsClass(): GraphicsCapability {
     /* no-op */
   }
   return cap
+}
+
+/** Set the "force full effects" override, re-detect, re-apply the <html> class
+ *  live, and notify listeners — so the change takes effect without a reload. */
+export function setForceFullEffects(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(FORCE_FULL_KEY, '1')
+    else localStorage.removeItem(FORCE_FULL_KEY)
+  } catch {
+    /* storage disabled — override won't persist, but still apply for this session */
+  }
+  cached = null
+  const cap = detectGraphicsCapability()
+  try {
+    document.documentElement.classList.toggle('gpu-lite', cap.lite)
+    window.dispatchEvent(new CustomEvent(GPU_OVERRIDE_EVENT, { detail: cap }))
+  } catch {
+    /* no-op */
+  }
 }
 
 /** Reactive-free getter for components that want to branch in JS. */
