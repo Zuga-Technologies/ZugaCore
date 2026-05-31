@@ -36,6 +36,33 @@ export function clearSession(): void {
   clearRefreshToken()
 }
 
+// Keys read by the login surfaces (ZugaApp LoginView, ZugaLife App.vue) to show
+// a "session expired" message and return the user to where they were after they
+// sign back in. sessionStorage (not a query param) because Spiritus's catch-all
+// route drops unknown query strings on the redirect to '/'.
+export const AUTH_REASON_KEY = 'zuga_auth_reason'
+export const POST_LOGIN_REDIRECT_KEY = 'zuga_post_login_redirect'
+
+/**
+ * Session is unrecoverable (401 with no token, or refresh failed). Clear it,
+ * remember where the user was, and send them to login with a friendly reason.
+ * Idempotent: a no-op if we're already sitting on the login screen.
+ */
+export function redirectToLogin(reason: 'expired' | 'required' = 'expired'): void {
+  clearSession()
+  if (typeof window === 'undefined') return
+  const path = window.location.pathname
+  if (path === '/login') return
+  try {
+    sessionStorage.setItem(AUTH_REASON_KEY, reason)
+    // Don't loop the user back to a transient API path; remember the page.
+    sessionStorage.setItem(POST_LOGIN_REDIRECT_KEY, path + window.location.search)
+  } catch {
+    // Private mode / storage disabled — redirect still works, just no message.
+  }
+  window.location.href = '/login'
+}
+
 // Single in-flight refresh — many concurrent calls hit 401 at the same time
 // when the access token expires; we want exactly one /session/refresh call
 // out, with everyone awaiting the same result.
@@ -154,12 +181,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
         res = await fetchWithResumeRetry(method, path, body, token)
       }
     }
-    // Still 401 (refresh failed, or no token to begin with)? Session is dead — clear and redirect.
+    // Still 401 (refresh failed, or no token to begin with)? Session is dead —
+    // clear and bounce to login with a reason + return path so the user can
+    // sign back in and land where they were instead of silently failing.
     if (res.status === 401) {
-      clearSession()
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login'
-      }
+      redirectToLogin(token ? 'expired' : 'required')
     }
   }
 
