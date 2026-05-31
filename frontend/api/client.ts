@@ -141,14 +141,20 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   let token = getToken()
   let res = await fetchWithResumeRetry(method, path, body, token)
 
-  if (res.status === 401 && token && !isRefreshCall) {
-    const newToken = await tryRefresh()
-    if (newToken) {
-      // Retry once with fresh token.
-      token = newToken
-      res = await fetchWithResumeRetry(method, path, body, token)
+  if (res.status === 401 && !isRefreshCall) {
+    // Only attempt refresh when we actually had a token to refresh. A 401 with
+    // no token at all (e.g. opened on a fresh origin where no session was ever
+    // stored — standalone dev server / rotating tunnel) skips straight to the
+    // redirect so the user lands on login instead of silently failing writes.
+    if (token) {
+      const newToken = await tryRefresh()
+      if (newToken) {
+        // Retry once with fresh token.
+        token = newToken
+        res = await fetchWithResumeRetry(method, path, body, token)
+      }
     }
-    // Still 401 after refresh? Session is genuinely dead — clear and redirect.
+    // Still 401 (refresh failed, or no token to begin with)? Session is dead — clear and redirect.
     if (res.status === 401) {
       clearSession()
       if (window.location.pathname !== '/login') {
