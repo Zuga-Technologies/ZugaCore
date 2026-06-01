@@ -470,8 +470,10 @@ async def login(body: LoginRequest) -> LoginResponse:
 
     record = await upsert_user(email=body.email, auth_provider="dev")
 
-    # Auto-register in SuperTokens for dev mode
-    if not record.supertokens_user_id:
+    # Auto-register in SuperTokens for dev mode — only when SuperTokens is the
+    # active backend. Standalone dev (no SuperTokens core) skips this and uses
+    # the local dev-token session below.
+    if get_supertokens_enabled() and not record.supertokens_user_id:
         st_result = await sign_up("public", record.email, "dev-mode-password")
         st_id = st_result.user.id if hasattr(st_result, "user") else record.id
         await link_supertokens_id(record.email, st_id)
