@@ -94,6 +94,24 @@ def _verify_overlay_hmac(
         raise HTTPException(status_code=401, detail="Invalid signature")
 
 
+async def _resolve_overlay_user_id(raw_id: str) -> str:
+    """Map an overlay-supplied X-User-Id to the canonical app ``users.id``.
+
+    Overlay clients sometimes send the SuperTokens session id instead of the
+    app-level ``users.id`` that ``token_balance`` is keyed by — which made a
+    funded wallet read as empty (and a spend hit a phantom wallet). Resolve a
+    SuperTokens id → app id when we can; leave non-account ids (Steam/device
+    ids that legitimately key their own wallets) untouched. Runs only after
+    auth has verified the raw id, so it never widens access.
+    """
+    from core.auth.repository import get_user_by_id, get_user_by_supertokens_id
+
+    if await get_user_by_id(raw_id) is not None:
+        return raw_id
+    rec = await get_user_by_supertokens_id(raw_id)
+    return rec.id if rec is not None else raw_id
+
+
 # ── User-Facing Token Endpoints ──────────────────────────────────────────
 
 @router.get("/api/tokens/balance")
@@ -133,6 +151,7 @@ async def gamer_balance(request: Request) -> dict:
         if not expected_key or service_key != expected_key:
             raise HTTPException(status_code=401, detail="Authentication required")
 
+    user_id = await _resolve_overlay_user_id(user_id)
     balance = await get_balance(user_id)
     return balance
 
@@ -492,6 +511,10 @@ async def overlay_token_spend(body: OverlaySpendRequest, request: Request) -> di
             raise
         except Exception:
             raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Canonicalize AFTER auth (HMAC is signed over the raw id) so a SuperTokens
+    # id can't drain a phantom wallet — spend hits the same wallet the UI reads.
+    user_id = await _resolve_overlay_user_id(user_id)
 
     # Look up email for the user
     email = ""
