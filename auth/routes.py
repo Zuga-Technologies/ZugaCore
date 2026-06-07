@@ -166,6 +166,8 @@ class UserResponse(BaseModel):
     is_admin: bool
     name: str | None = None
     avatar_url: str | None = None
+    # Apps this ZugaID owns — the portal embeds these (admin owns-all).
+    apps: list[str] = []
 
 
 class AuthConfigResponse(BaseModel):
@@ -203,6 +205,21 @@ def _user_dict(user: CurrentUser) -> dict:
         "id": user.id, "email": user.email, "role": user.role,
         "is_admin": user.is_admin, "name": user.name, "avatar_url": user.avatar_url,
     }
+
+
+async def _user_dict_with_apps(user: CurrentUser) -> dict:
+    """LoginResponse user dict, equipping + attaching owned apps.
+
+    Grants the host default bundle and this deploy's standalone slug (idempotent,
+    so it also backfills existing accounts), then returns the owned set. Admins
+    own-all so the portal never hides a studio from them.
+    """
+    from core.auth.entitlements import grant_login_defaults, list_apps
+
+    await grant_login_defaults(user.id)
+    d = _user_dict(user)
+    d["apps"] = ["*"] if user.is_admin else await list_apps(user.id)
+    return d
 
 
 async def _is_waitlist_approved(email: str) -> bool:
@@ -380,7 +397,7 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
     token, refresh_token = await _create_session(st_user_id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=await _user_dict_with_apps(user))
 
 
 @router.post("/verify-email", response_model=MessageResponse)
@@ -483,7 +500,7 @@ async def login(body: LoginRequest) -> LoginResponse:
     token, refresh_token = await _create_session(record.supertokens_user_id or record.id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=await _user_dict_with_apps(user))
 
 
 @router.post("/google", response_model=LoginResponse)
@@ -529,7 +546,7 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
     token, refresh_token = await _create_session(st_user_id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=await _user_dict_with_apps(user))
 
 
 @router.post("/oauth", response_model=LoginResponse)
@@ -587,7 +604,7 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
     token, refresh_token = await _create_session(st_result.user.id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=await _user_dict_with_apps(user))
 
 
 @router.post("/session/refresh", response_model=RefreshResponse)
@@ -676,6 +693,9 @@ async def logout(request: Request, user: CurrentUser = Depends(get_current_user)
 @router.get("/me", response_model=UserResponse)
 async def me(user: CurrentUser = Depends(get_current_user)) -> UserResponse:
     """Return info about the currently authenticated user."""
+    from core.auth.entitlements import list_apps
+
+    apps = ["*"] if user.is_admin else await list_apps(user.id)
     return UserResponse(
         id=user.id,
         email=user.email,
@@ -683,6 +703,7 @@ async def me(user: CurrentUser = Depends(get_current_user)) -> UserResponse:
         is_admin=user.is_admin,
         name=user.name,
         avatar_url=user.avatar_url,
+        apps=apps,
     )
 
 

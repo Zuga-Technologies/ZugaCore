@@ -9,6 +9,8 @@ interface User {
   is_admin: boolean
   name?: string | null
   avatar_url?: string | null
+  // Apps this ZugaID owns — the portal embeds these. ["*"] = owns-all (admin).
+  apps?: string[]
 }
 
 interface LoginResponse {
