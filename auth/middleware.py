@@ -88,10 +88,12 @@ async def _validate_token(token: str) -> CurrentUser | None:
                 anti_csrf_check=False,
                 check_database=False,
             )
-        except (UnauthorisedError, TryRefreshTokenError):
+        except (UnauthorisedError, TryRefreshTokenError) as _ste:
+            logger.warning("[VALIDATE-DIAG] rejected: %s (%s)", type(_ste).__name__, str(_ste)[:160])
             return None
 
         if session is None:
+            logger.warning("[VALIDATE-DIAG] rejected: session is None")
             return None
 
         st_user_id = session.get_user_id()
@@ -115,5 +117,5 @@ async def _validate_token(token: str) -> CurrentUser | None:
         )
 
     except Exception as e:
-        logger.debug("SuperTokens token validation failed: %s", e)
+        logger.warning("[VALIDATE-DIAG] outer exception: %r", e)
         return None
