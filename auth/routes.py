@@ -819,6 +819,8 @@ _USER_DEPENDENT_TABLES: tuple[str, ...] = (
     "life_xp_transactions",
     "meditation_sessions",
     "mood_entries",
+    "spiritus_consents",
+    "spiritus_zugabot_outbox",
     "subscription",
     "theme_installs",
     "theme_overrides",
@@ -872,44 +874,21 @@ async def admin_reset_user(
     return {"status": "ok", "email": record.email, "role": new_role, "onboarding_reset": True}
 
 
-@router.post("/admin/delete-user")
-async def admin_delete_user(
-    body: AdminDeleteUserRequest,
-    _admin: CurrentUser = Depends(require_admin),
-) -> dict:
-    """Admin: hard-delete a user from SuperTokens Core + app DB + dependent tables.
+async def _hard_delete_user(record) -> dict:
+    """Hard-delete a user from SuperTokens Core + app DB + dependent tables.
 
     Order: revoke sessions → delete from SuperTokens → cascade dependents → delete
     app user row. Any failure before the final step leaves a recoverable state
     (user still in app DB, just logged out). This is a hard delete — there is no
-    soft-delete column. Requires body.confirm to exactly match body.email (typo
-    protection; prevents fat-finger deletes from curl/Postman).
+    soft-delete column.
 
     Returns a manifest of exactly what was removed per store/table.
     """
     from sqlalchemy import text
     from core.database.session import get_session
-    from supertokens_python.asyncio import delete_user as st_delete_user
-
-    email = body.email.strip().lower()
-    if body.confirm.strip().lower() != email:
-        raise HTTPException(status_code=400, detail="confirm must match email exactly")
-
-    record = await get_user_by_email(email)
-    if record is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Guard: don't let an admin delete themselves in one call. Forces the use
-    # of a second admin account for self-removal — same principle as requiring
-    # two ops people to approve prod changes. Cheap, prevents a tired 3am mistake.
-    if record.id == _admin.id:
-        raise HTTPException(
-            status_code=400,
-            detail="Refusing to delete your own account. Use a different admin account.",
-        )
 
     manifest: dict = {
-        "email": email,
+        "email": record.email,
         "user_id": record.id,
         "supertokens_user_id": record.supertokens_user_id,
         "sessions_revoked": False,
@@ -921,11 +900,13 @@ async def admin_delete_user(
     # 1. Revoke active sessions first — kicks any open logins BEFORE we pull
     #    the auth credential out from under them.
     if record.supertokens_user_id:
+        from supertokens_python.asyncio import delete_user as st_delete_user
+
         try:
             await revoke_all_sessions_for_user(record.supertokens_user_id)
             manifest["sessions_revoked"] = True
         except Exception as exc:
-            logger.warning("Failed to revoke sessions for %s: %s", email, exc)
+            logger.warning("Failed to revoke sessions for %s: %s", record.email, exc)
 
         # 2. Delete from SuperTokens Core. This wipes credentials + third-party
         #    linkages in the ST DB. Uses the SDK's delete_user, not a raw REST
@@ -934,7 +915,7 @@ async def admin_delete_user(
             await st_delete_user(record.supertokens_user_id)
             manifest["supertokens_deleted"] = True
         except Exception as exc:
-            logger.error("Failed to delete SuperTokens user %s: %s", email, exc)
+            logger.error("Failed to delete SuperTokens user %s: %s", record.email, exc)
             raise HTTPException(
                 status_code=502,
                 detail=f"SuperTokens delete failed: {exc}. App user NOT deleted.",
@@ -954,7 +935,7 @@ async def admin_delete_user(
                     manifest["related_rows_deleted"][table] = result.rowcount
             except Exception as exc:
                 # Table doesn't exist in this deploy, or schema mismatch — skip.
-                logger.debug("Skip cascade for %s (%s): %s", table, email, exc)
+                logger.debug("Skip cascade for %s (%s): %s", table, record.email, exc)
 
         # 4. Finally, remove the app user row itself.
         await session.execute(
@@ -963,8 +944,91 @@ async def admin_delete_user(
         )
         manifest["app_user_deleted"] = True
 
+    return manifest
+
+
+@router.post("/admin/delete-user")
+async def admin_delete_user(
+    body: AdminDeleteUserRequest,
+    _admin: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Admin: hard-delete any user. Requires body.confirm to exactly match
+    body.email (typo protection; prevents fat-finger deletes from curl/Postman).
+    """
+    email = body.email.strip().lower()
+    if body.confirm.strip().lower() != email:
+        raise HTTPException(status_code=400, detail="confirm must match email exactly")
+
+    record = await get_user_by_email(email)
+    if record is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Guard: don't let an admin delete themselves in one call. Forces the use
+    # of a second admin account for self-removal — same principle as requiring
+    # two ops people to approve prod changes. Cheap, prevents a tired 3am mistake.
+    # (Self-deletion as a USER goes through DELETE /users/me instead.)
+    if record.id == _admin.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing to delete your own account. Use a different admin account.",
+        )
+
+    manifest = await _hard_delete_user(record)
     logger.warning(
         "ADMIN DELETE: %s removed user %s (st_id=%s). Manifest: %s",
         _admin.email, email, record.supertokens_user_id, manifest,
+    )
+    return {"status": "ok", "deleted": manifest}
+
+
+class SelfDeleteRequest(BaseModel):
+    confirm: str
+
+
+@router.delete("/users/me")
+async def delete_own_account(
+    body: SelfDeleteRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Self-serve full account deletion (WA MHMDA / CA CMIA deletion right).
+
+    Hard-deletes the calling user's account: SuperTokens credentials, every
+    user_id-bearing row in _USER_DEPENDENT_TABLES (including spiritus_consents),
+    and the app user row. Purge is immediate — well inside the 30-day SLA the
+    privacy policy promises (WA MHMDA allows 45 days).
+
+    Requires body.confirm to exactly match the account email so a stray client
+    call can't wipe an account. The session is revoked as part of deletion, so
+    the caller is logged out everywhere when this returns.
+    """
+    if body.confirm.strip().lower() != user.email.strip().lower():
+        raise HTTPException(status_code=400, detail="confirm must match your account email exactly")
+
+    record = await get_user_by_email(user.email.strip().lower())
+    if record is None or record.id != user.id:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Stamp deletion_requested_at on the consent row first (best-effort) — the
+    # row itself is purged moments later, but the stamp lands in the WAL/log
+    # trail and anchors the SLA window if the purge is ever interrupted.
+    try:
+        from sqlalchemy import text
+        from core.database.session import get_session
+
+        async with get_session() as session:
+            await session.execute(
+                text(
+                    "UPDATE spiritus_consents SET deletion_requested_at = CURRENT_TIMESTAMP"
+                    " WHERE user_id = :uid"
+                ),
+                {"uid": record.id},
+            )
+    except Exception:
+        pass  # Table may not exist in non-Spiritus deployments.
+
+    manifest = await _hard_delete_user(record)
+    logger.warning(
+        "SELF DELETE: user %s (id=%s, st_id=%s) deleted own account. Manifest: %s",
+        record.email, record.id, record.supertokens_user_id, manifest,
     )
     return {"status": "ok", "deleted": manifest}
