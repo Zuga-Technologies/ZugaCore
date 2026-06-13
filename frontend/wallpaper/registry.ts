@@ -27,6 +27,14 @@ export interface ThemeDefinition {
   scene?: string
   overlay?: number      // dark overlay opacity (0-1) for bright scenes
   fallbackBg?: string   // CSS gradient fallback while scene mounts
+  /** MP4 video source path for video-background themes. */
+  video?: string
+  /** WebM/VP9 video source — preferred over MP4 when the browser supports it. */
+  videoWebm?: string
+  /** Still-frame poster shown when motion is suppressed (reduced-motion or gpu-lite). */
+  poster?: string
+  /** Playback rate for the video loop (default 0.5). */
+  speed?: number
 }
 
 export const THEMES: ThemeDefinition[] = [

@@ -9,7 +9,7 @@ import {
   Gift, Zap, Clock, Infinity, X, Download, PieChart, ShieldCheck,
 } from 'lucide-vue-next'
 
-const props = withDefaults(defineProps<{
+withDefaults(defineProps<{
   tokenLabel?: string
   showHistory?: boolean
 }>(), {

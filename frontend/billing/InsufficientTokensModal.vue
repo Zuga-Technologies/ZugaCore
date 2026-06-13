@@ -7,7 +7,7 @@ interface Props {
   visible: boolean
 }
 
-const props = withDefaults(defineProps<Props>(), {
+withDefaults(defineProps<Props>(), {
   estimatedCost: 0,
   currentBalance: 0,
 })
