@@ -29,6 +29,7 @@ from supertokens_python.recipe.emailpassword.interfaces import (
 from supertokens_python.recipe.session.asyncio import (
     create_new_session_without_request_response,
     get_session_without_request_response,
+    refresh_session_without_request_response,
     revoke_all_sessions_for_user,
 )
 from supertokens_python.recipe.thirdparty.asyncio import (
@@ -46,6 +47,7 @@ from core.auth.config import (
     get_google_client_id,
     get_google_client_secret,
     get_microsoft_client_id,
+    get_supertokens_enabled,
 )
 from core.auth.middleware import get_current_user, require_admin
 from core.auth.models import CurrentUser
@@ -139,6 +141,19 @@ class OAuthLoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     token: str
     user: dict
+    # Desktop-only: refresh token so native clients (ZugaClaw, ZugaGamer)
+    # can refresh without a cookie jar. Web ignores — SuperTokens cookie
+    # handles browser refresh.
+    refresh_token: str | None = None
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class RefreshResponse(BaseModel):
+    token: str
+    refresh_token: str
 
 
 class MessageResponse(BaseModel):
@@ -164,8 +179,17 @@ class AuthConfigResponse(BaseModel):
 
 # ── SuperTokens session helpers ────────────────────────────────────
 
-async def _create_session(user_id: str) -> str:
-    """Create a SuperTokens session and return the access token string."""
+async def _create_session(user_id: str) -> tuple[str, str]:
+    """Create a session and return (access_token, refresh_token).
+
+    When SuperTokens is disabled (standalone dev), issues a simple dev token
+    instead so the frontend can authenticate without a SuperTokens Core.
+    """
+    if not get_supertokens_enabled():
+        import base64
+        token = "dev:" + base64.urlsafe_b64encode(user_id.encode()).decode()
+        return token, token
+
     session = await create_new_session_without_request_response(
         tenant_id="public",
         recipe_user_id=RecipeUserId(user_id),
@@ -174,7 +198,7 @@ async def _create_session(user_id: str) -> str:
         disable_anti_csrf=True,
     )
     tokens = session.get_all_session_tokens_dangerously()
-    return tokens["accessToken"]
+    return tokens["accessToken"], tokens["refreshToken"]
 
 
 def _user_dict(user: CurrentUser) -> dict:
@@ -202,16 +226,61 @@ async def _is_waitlist_approved(email: str) -> bool:
 
 
 async def _check_invite(email: str) -> None:
-    """Raise 403 if invite-only mode and email not in allowed list or waitlist."""
+    """Allow if whitelisted/waitlist-approved; otherwise auto-add to waitlist as pending,
+    notify the admin (Approve/Deny email), and raise a friendly 403 the FE can display.
+
+    Replaces the prior silent-block 403 — every signup attempt is now visible to the admin.
+    """
     allowed = _get_allowed_emails()
     if not allowed:
         return
     if email in allowed:
         return
-    # Check if email was approved via waitlist
     if await _is_waitlist_approved(email):
         return
-    raise HTTPException(status_code=403, detail="Invite-only beta — contact the admin for access.")
+
+    await _enqueue_access_request(email)
+    raise HTTPException(
+        status_code=403,
+        detail="We received your access request — you'll get an email once approved.",
+    )
+
+
+async def _enqueue_access_request(email: str) -> None:
+    """Insert a pending waitlist row (idempotent) and fire the admin Approve/Deny email.
+
+    Best-effort: a failure here must not bubble up — we still want the user to see the
+    friendly 'request received' message even if the notification path is broken.
+    """
+    position = 0
+    try:
+        from core.database.session import get_session
+        from sqlalchemy import text
+        async with get_session() as session:
+            row = await session.execute(
+                text("SELECT status FROM waitlist WHERE email = :email"),
+                {"email": email},
+            )
+            existing = row.fetchone()
+            if existing is None:
+                await session.execute(
+                    text(
+                        "INSERT INTO waitlist (email, status, source, created_at, updated_at) "
+                        "VALUES (:email, 'pending', 'signup_form', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {"email": email},
+                )
+            count_row = await session.execute(text("SELECT COUNT(*) FROM waitlist"))
+            position = (count_row.scalar() or 1)
+    except Exception as exc:
+        logger.error("[invite] waitlist insert failed for %s: %s", email, exc)
+        return
+
+    try:
+        from api.waitlist import _email_admin_waitlist
+        await _email_admin_waitlist(email, position)
+    except Exception as exc:
+        logger.error("[invite] admin notify failed for %s: %s", email, exc)
 
 
 # ── Endpoints ──────────────────────────────────────────────────────
@@ -312,10 +381,10 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
         id=record.id, email=record.email, role=role,
         name=record.name, avatar_url=record.avatar_url,
     )
-    token = await _create_session(st_user_id)
+    token, refresh_token = await _create_session(st_user_id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
 
 
 @router.post("/verify-email", response_model=MessageResponse)
@@ -405,18 +474,20 @@ async def login(body: LoginRequest) -> LoginResponse:
 
     record = await upsert_user(email=body.email, auth_provider="dev")
 
-    # Auto-register in SuperTokens for dev mode
-    if not record.supertokens_user_id:
+    # Auto-register in SuperTokens for dev mode — only when SuperTokens is the
+    # active backend. Standalone dev (no SuperTokens core) skips this and uses
+    # the local dev-token session below.
+    if get_supertokens_enabled() and not record.supertokens_user_id:
         st_result = await sign_up("public", record.email, "dev-mode-password")
         st_id = st_result.user.id if hasattr(st_result, "user") else record.id
         await link_supertokens_id(record.email, st_id)
         record = await get_user_by_email(record.email)
 
     user = CurrentUser(id=record.id, email=record.email, role=record.role)
-    token = await _create_session(record.supertokens_user_id or record.id)
+    token, refresh_token = await _create_session(record.supertokens_user_id or record.id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
 
 
 @router.post("/google", response_model=LoginResponse)
@@ -459,10 +530,10 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
         id=record.id, email=record.email, role=record.role,
         name=record.name, avatar_url=record.avatar_url,
     )
-    token = await _create_session(st_user_id)
+    token, refresh_token = await _create_session(st_user_id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
 
 
 @router.post("/oauth", response_model=LoginResponse)
@@ -517,10 +588,74 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
         id=record.id, email=record.email, role=record.role,
         name=record.name, avatar_url=record.avatar_url,
     )
-    token = await _create_session(st_result.user.id)
+    token, refresh_token = await _create_session(st_result.user.id)
     await _maybe_welcome_grant(record.id)
 
-    return LoginResponse(token=token, user=_user_dict(user))
+    return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
+
+
+@router.post("/session/refresh", response_model=RefreshResponse)
+async def refresh_session_endpoint(body: RefreshRequest, request: Request) -> RefreshResponse:
+    """Rotate a SuperTokens session using a desktop-held refresh token.
+
+    Used by native clients (ZugaClaw, ZugaGamer) that have no cookie jar.
+    Web clients don't hit this — their refresh flows through SuperTokens'
+    cookie-based endpoint.
+
+    Refresh tokens ROTATE on every successful call: the returned
+    refresh_token REPLACES the one sent. Clients must persist the new pair.
+    On 401, the client should clear stored tokens and prompt re-login.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"refresh:{client_ip}", max_requests=30, window_seconds=60)
+
+    try:
+        session = await refresh_session_without_request_response(
+            refresh_token=body.refresh_token,
+            disable_anti_csrf=True,
+        )
+    except Exception as exc:
+        # UnauthorisedError, TokenTheftError, or transport error — treat all
+        # as "please log in again." We never surface SuperTokens internals to
+        # the client, and we don't rotate on failure.
+        # Log class + repr at WARNING so the next phone-bounce shows up in
+        # Railway logs and we can tell theft from expiry from transport.
+        logger.warning(
+            "[refresh-401] ip=%s exc_class=%s repr=%r",
+            client_ip, exc.__class__.__name__, exc,
+        )
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    tokens = session.get_all_session_tokens_dangerously()
+    return RefreshResponse(
+        token=tokens["accessToken"],
+        refresh_token=tokens["refreshToken"],
+    )
+
+
+@router.post("/session/for-desktop", response_model=RefreshResponse)
+async def mint_session_for_desktop(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> RefreshResponse:
+    """Mint a fresh SuperTokens session for a user already authed on the web.
+
+    When ZugaClaw / ZugaGamer launch `zugabot.ai/login?redirect=<proto>://...`
+    and the user is already signed in on the web, LoginView calls this with
+    the existing Bearer token. We issue a fresh {access, refresh} pair so the
+    desktop app has what it needs — no re-entering credentials.
+
+    Requires a valid Bearer token; the minted pair is bound to the same user.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"desktop-mint:{client_ip}", max_requests=10, window_seconds=60)
+
+    record = await get_user_by_email(user.email)
+    if record is None or not record.supertokens_user_id:
+        raise HTTPException(status_code=400, detail="User has no SuperTokens ID")
+
+    token, refresh_token = await _create_session(record.supertokens_user_id)
+    return RefreshResponse(token=token, refresh_token=refresh_token)
 
 
 @router.post("/logout")
@@ -599,6 +734,32 @@ async def get_onboarding(user: CurrentUser = Depends(get_current_user)) -> dict:
     return {"completed": completed}
 
 
+class BgThemePrefBody(BaseModel):
+    theme: str | None = None
+
+
+@router.get("/bg-theme-pref")
+async def get_bg_theme_pref_route(user: CurrentUser = Depends(get_current_user)) -> dict:
+    """Return the users account-scoped wallpaper theme id (None = unset)."""
+    from auth.repository import get_bg_theme_pref
+    theme = await get_bg_theme_pref(user.id)
+    return {"theme": theme}
+
+
+@router.patch("/bg-theme-pref")
+async def patch_bg_theme_pref_route(
+    body: BgThemePrefBody,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Persist the users account-scoped wallpaper theme id."""
+    from auth.repository import set_bg_theme_pref
+    val = (body.theme or None)
+    if val and len(val) > 64:
+        val = val[:64]
+    await set_bg_theme_pref(user.id, val)
+    return {"theme": val}
+
+
 @router.post("/onboarding/complete")
 async def complete_onboarding(user: CurrentUser = Depends(get_current_user)) -> dict:
     """Mark app-level onboarding as completed."""
@@ -619,6 +780,10 @@ class AdminResetRequest(BaseModel):
 
 class AdminDeleteUserRequest(BaseModel):
     email: str
+    confirm: str
+
+
+class SelfDeleteRequest(BaseModel):
     confirm: str
 
 
@@ -662,6 +827,7 @@ _USER_DEPENDENT_TABLES: tuple[str, ...] = (
     "life_xp_transactions",
     "meditation_sessions",
     "mood_entries",
+    "spiritus_consents",
     "subscription",
     "theme_installs",
     "theme_overrides",
@@ -809,5 +975,77 @@ async def admin_delete_user(
     logger.warning(
         "ADMIN DELETE: %s removed user %s (st_id=%s). Manifest: %s",
         _admin.email, email, record.supertokens_user_id, manifest,
+    )
+    return {"status": "ok", "deleted": manifest}
+
+
+@router.delete("/users/me")
+async def self_delete_account(
+    body: SelfDeleteRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """Self-serve account deletion (WA MHMDA / CA CMIA deletion right).
+
+    Requires body.confirm to match the caller's email (case+whitespace insensitive).
+    Cascades all dependent rows then removes the app user record.
+    """
+    from sqlalchemy import text
+    from core.database.session import get_session
+
+    if body.confirm.strip().lower() != user.email.strip().lower():
+        raise HTTPException(status_code=400, detail="confirm must match your account email")
+
+    record = await get_user_by_email(user.email.strip().lower())
+    if record is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    manifest: dict = {
+        "email": record.email,
+        "user_id": record.id,
+        "sessions_revoked": False,
+        "supertokens_deleted": False,
+        "related_rows_deleted": {},
+        "app_user_deleted": False,
+    }
+
+    if record.supertokens_user_id:
+        try:
+            await revoke_all_sessions_for_user(record.supertokens_user_id)
+            manifest["sessions_revoked"] = True
+        except Exception as exc:
+            logger.warning("Failed to revoke sessions for %s: %s", record.email, exc)
+
+        try:
+            from supertokens_python.asyncio import delete_user as st_delete_user
+            await st_delete_user(record.supertokens_user_id)
+            manifest["supertokens_deleted"] = True
+        except Exception as exc:
+            logger.error("Failed to delete SuperTokens user %s: %s", record.email, exc)
+            raise HTTPException(
+                status_code=502,
+                detail=f"SuperTokens delete failed: {exc}. Account NOT deleted.",
+            )
+
+    async with get_session() as session:
+        for table in _USER_DEPENDENT_TABLES:
+            try:
+                result = await session.execute(
+                    text(f"DELETE FROM {table} WHERE user_id = :uid"),
+                    {"uid": record.id},
+                )
+                if result.rowcount:
+                    manifest["related_rows_deleted"][table] = result.rowcount
+            except Exception as exc:
+                logger.debug("Skip cascade for %s (%s): %s", table, record.email, exc)
+
+        await session.execute(
+            text("DELETE FROM users WHERE id = :uid"),
+            {"uid": record.id},
+        )
+        manifest["app_user_deleted"] = True
+
+    logger.warning(
+        "SELF DELETE: user %s deleted their own account. Manifest: %s",
+        record.email, manifest,
     )
     return {"status": "ok", "deleted": manifest}

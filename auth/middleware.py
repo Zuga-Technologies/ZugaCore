@@ -37,6 +37,28 @@ async def get_current_user(request: Request) -> CurrentUser:
     return user
 
 
+async def get_current_user_optional(request: Request) -> CurrentUser | None:
+    """Like get_current_user but returns None instead of raising 401.
+
+    Use for endpoints that support both authenticated and anonymous callers.
+    Never grants elevated privilege on None — the caller is responsible for
+    failing safe (treat None as the lowest privilege level).
+    """
+    auth_header = request.headers.get("Authorization")
+
+    # Fallback: accept token as query param (for <video>/<a> elements that can't send headers)
+    if not auth_header:
+        query_token = request.query_params.get("token")
+        if query_token:
+            auth_header = f"Bearer {query_token}"
+
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+
+    token = auth_header.removeprefix("Bearer ")
+    return await _validate_token(token)
+
+
 async def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     """Require the current user to be an admin."""
 
@@ -46,31 +68,30 @@ async def require_admin(user: CurrentUser = Depends(get_current_user)) -> Curren
     return user
 
 
-# ── Owner detection ───────────────────────────────────────────
-# Moved from core.ai.agent 2026-04-17 to decouple the greeting + chat
-# flows from agent.py (which the remote-chat project will retire).
-# ZUGABOT_OWNER_ID or ZUGABOT_OWNER_EMAIL identify "the person who
-# created Zugabot" — used for warmer tone + elevated tool access.
-import os as _owner_os
-
-_OWNER_ID: str = _owner_os.environ.get("ZUGABOT_OWNER_ID", "")
-_OWNER_EMAIL: str = _owner_os.environ.get("ZUGABOT_OWNER_EMAIL", "").lower()
-
-
-def _is_owner(user_id: str | None, user_email: str | None) -> bool:
-    """Check if this user is Zugabot's creator."""
-    if _OWNER_ID and user_id == _OWNER_ID:
-        return True
-    if _OWNER_EMAIL and user_email and user_email.lower() == _OWNER_EMAIL:
-        return True
-    return False
-
-
 async def _validate_token(token: str) -> CurrentUser | None:
-    """Verify a SuperTokens access token JWT and return the user.
+    """Verify an access token and return the user.
 
-    Validates the JWT signature locally using cached JWKS (no network call).
+    Tries SuperTokens JWT first; falls back to dev tokens (standalone dev mode).
     """
+    # Dev token path — used when SUPERTOKENS_ENABLED=false
+    if token.startswith("dev:"):
+        try:
+            import base64
+            user_id = base64.urlsafe_b64decode(token[4:].encode()).decode()
+            from core.auth.repository import get_user_by_id
+            record = await get_user_by_id(user_id)
+            if record is None:
+                return None
+            return CurrentUser(
+                id=record.id,
+                email=record.email,
+                role=record.role,
+                name=record.name,
+                avatar_url=record.avatar_url,
+            )
+        except Exception:
+            return None
+
     try:
         from supertokens_python.recipe.session.asyncio import (
             get_session_without_request_response,
