@@ -2,10 +2,11 @@
 
 import os
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from core.auth.models import UserRecord
+from core.auth.models import UserRecord, ZugabotConsent
 from core.database.session import get_session
 
 
@@ -208,3 +209,50 @@ async def set_bg_theme_pref(user_id: str, theme: str | None) -> None:
         if user is None:
             raise ValueError("User not found")
         user.bg_theme_pref = theme
+
+
+# ── Zugabot per-user consent registry ────────────────────────────────────────
+
+
+async def has_zugabot_consent(user_id: str, app_slug: str) -> bool:
+    """Has THIS user consented to THIS app's Zugabot feed?
+
+    The generalized egress gate every connector consults instead of `_is_admin`
+    once multi-user isolation is enabled. Fail-closed semantics: unknown user,
+    missing row, or NULL `consented_at` all return False — no data crosses
+    without a recorded, active opt-in.
+    """
+    if not user_id or not app_slug:
+        return False
+    async with get_session() as session:
+        row = await session.scalar(
+            select(ZugabotConsent).where(
+                ZugabotConsent.user_id == user_id,
+                ZugabotConsent.app_slug == app_slug,
+            )
+        )
+    return row is not None and row.consented_at is not None
+
+
+async def set_zugabot_consent(user_id: str, app_slug: str, consented: bool) -> None:
+    """Record (or revoke) a user's consent for an app's Zugabot feed.
+
+    Upserts the one row per (user_id, app_slug). `consented=True` stamps
+    `consented_at=now`; `consented=False` clears it to NULL (the revoke that
+    the connector's purge path keys off). Does not itself purge ingested rows —
+    that is the per-app consumer's job.
+    """
+    now = datetime.now(timezone.utc) if consented else None
+    async with get_session() as session:
+        row = await session.scalar(
+            select(ZugabotConsent).where(
+                ZugabotConsent.user_id == user_id,
+                ZugabotConsent.app_slug == app_slug,
+            )
+        )
+        if row is None:
+            session.add(
+                ZugabotConsent(user_id=user_id, app_slug=app_slug, consented_at=now)
+            )
+        else:
+            row.consented_at = now

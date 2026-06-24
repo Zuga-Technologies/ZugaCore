@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 
-from sqlalchemy import Boolean, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database.base import Base, TimestampMixin
@@ -55,3 +56,24 @@ class UserApp(Base, TimestampMixin):
     # store_purchase | granted | bundled | trial
     source: Mapped[str] = mapped_column(String(32), default="granted")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ZugabotConsent(Base, TimestampMixin):
+    """Per-(user, app) opt-in for that app's derived data to flow to Zugabot.
+
+    Generalizes Spiritus's app-owned `LifeConsent.consent_zugabot_connection_at`
+    into one ZugaApp-owned table every connector's egress guard can consult. The
+    timestamp IS the flag (mirrors LifeConsent): `consented_at` set => consent on;
+    NULL => off/revoked. A revoke sets it back to NULL (and triggers the per-app
+    purge separately). One row per (user_id, app_slug).
+    """
+
+    __tablename__ = "zugabot_consents"
+    __table_args__ = (UniqueConstraint("user_id", "app_slug", name="uq_zugabot_consent"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(255), index=True)
+    app_slug: Mapped[str] = mapped_column(String(64), index=True)
+    consented_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
