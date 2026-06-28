@@ -13,6 +13,9 @@ async def get_current_user(request: Request) -> CurrentUser:
     This is used as a FastAPI dependency. Any route that needs
     authentication adds: user: CurrentUser = Depends(get_current_user)
     """
+    from core.local_mode import LOCAL_MODE, local_user
+    if LOCAL_MODE:
+        return local_user()
 
     auth_header = request.headers.get("Authorization")
 
@@ -44,6 +47,10 @@ async def get_current_user_optional(request: Request) -> CurrentUser | None:
     Never grants elevated privilege on None — the caller is responsible for
     failing safe (treat None as the lowest privilege level).
     """
+    from core.local_mode import LOCAL_MODE, local_user
+    if LOCAL_MODE:
+        return local_user()
+
     auth_header = request.headers.get("Authorization")
 
     # Fallback: accept token as query param (for <video>/<a> elements that can't send headers)
