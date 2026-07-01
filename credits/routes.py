@@ -438,17 +438,46 @@ class ReportSpendRequest(BaseModel):
     metadata: dict | None = None
 
 
+class ServiceGrantRequest(BaseModel):
+    user_id: str = Field(max_length=255)
+    amount: float = Field(gt=0, le=100_000)
+    reason: str = Field(min_length=1, max_length=255)
+
+
 @router.post("/api/credits/can-spend")
 async def check_can_spend(
     body: CanSpendRequest,
     _key: str = Depends(_verify_service_key),
 ) -> dict:
     """Check if a user can spend tokens. Service-to-service only."""
-    allowed = await can_spend(body.user_id, body.email, body.estimated_tokens)
+    try:
+        allowed = await can_spend(body.user_id, body.email, body.estimated_tokens)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not allowed:
         balance = await get_balance(body.user_id)
         return {"allowed": False, "balance": balance}
     return {"allowed": True}
+
+
+@router.post("/api/credits/grant")
+async def service_grant(
+    body: ServiceGrantRequest,
+    _key: str = Depends(_verify_service_key),
+) -> dict:
+    """Grant tokens to a user from a service-to-service caller.
+
+    Same X-Service-Key gate as can-spend / report-spend. Used by standalone
+    studios (e.g. ZugaSnipe verified-buy rewards) to credit user wallets
+    without going through the user-admin path. Returns the manager's
+    `{tokens_granted, new_total}` shape.
+    """
+    result = await grant_tokens(body.user_id, body.amount, body.reason)
+    logger.info(
+        "Service grant: user=%s amount=%.1f reason=%s",
+        body.user_id, body.amount, body.reason,
+    )
+    return result
 
 
 @router.post("/api/credits/report-spend")
@@ -464,15 +493,18 @@ async def report_spend(
         if len(serialized) > 4096:
             meta = {"truncated": True, "original_keys": list(meta.keys())[:20]}
 
-    await record_spend(
-        user_id=body.user_id,
-        tokens=body.tokens,
-        cost_usd=body.cost_usd,
-        service=body.service,
-        reason=body.reason,
-        model=body.model,
-        metadata=meta,
-    )
+    try:
+        await record_spend(
+            user_id=body.user_id,
+            tokens=body.tokens,
+            cost_usd=body.cost_usd,
+            service=body.service,
+            reason=body.reason,
+            model=body.model,
+            metadata=meta,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     logger.info(
         "Service spend reported: user=%s tokens=%.1f service=%s reason=%s",
         body.user_id, body.tokens, body.service, body.reason,
