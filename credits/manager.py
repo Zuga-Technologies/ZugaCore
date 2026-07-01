@@ -46,6 +46,27 @@ def _get_user_lock(user_id: str) -> asyncio.Lock:
         _user_locks[user_id] = asyncio.Lock()
     return _user_locks[user_id]
 
+# ── Placeholder / sentinel user_id guard ────────────────────────────────
+# A lazy caller that hasn't obtained a real authenticated user_id might pass
+# a placeholder like "default" or "anonymous". Allowing that through merges
+# ALL such callers into one shared wallet — the "default bucket" regression.
+# Any value in this set is hard-blocked at the manager level so no new route
+# can accidentally reintroduce the bug.
+_BANNED_USER_IDS: frozenset[str] = frozenset({
+    "default", "", "anonymous", "none", "null", "system", "anon",
+    "undefined", "unknown",
+})
+
+
+def _validate_user_id(user_id: str) -> None:
+    """Raise ValueError if user_id is a known placeholder that creates a shared bucket."""
+    if user_id.strip().lower() in _BANNED_USER_IDS:
+        raise ValueError(
+            f"user_id={user_id!r} is a reserved placeholder. "
+            "Obtain a real authenticated user ID before billing operations."
+        )
+
+
 # ── Constants ──────────────────────────────────────────────────────────
 
 ZUGATOKENS_PER_DOLLAR = 100  # 1 ZugaToken = $0.01
@@ -231,6 +252,7 @@ async def can_spend(user_id: str, email: str, estimated_tokens: float = 0) -> bo
     WARNING: This is a non-atomic read. For spend operations, use try_spend()
     which holds a per-user lock across check+deduct to prevent TOCTOU races.
     """
+    _validate_user_id(user_id)
     if _is_unlimited(email):
         # Verify this email actually belongs to this user_id to prevent
         # a caller from passing admin_email + victim_user_id
@@ -280,6 +302,7 @@ async def try_spend(
     This is the PREFERRED way to spend tokens. Use this instead of
     separate can_spend() + record_spend() calls.
     """
+    _validate_user_id(user_id)
     # Admins bypass the gate but still get audited
     if _is_unlimited(email):
         stored_email = await _get_user_email(user_id)
@@ -410,6 +433,7 @@ async def record_spend(
     2. Writes a token_transaction record
     3. Writes a credit_ledger record (raw cost audit)
     """
+    _validate_user_id(user_id)
     async with get_session() as session:
         balance = await _get_or_create_balance(session, user_id)
 
