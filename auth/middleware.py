@@ -73,8 +73,12 @@ async def _validate_token(token: str) -> CurrentUser | None:
 
     Tries SuperTokens JWT first; falls back to dev tokens (standalone dev mode).
     """
-    # Dev token path — used when SUPERTOKENS_ENABLED=false
-    if token.startswith("dev:"):
+    # Dev token path — ONLY valid when SUPERTOKENS_ENABLED=false. Without this
+    # gate, anyone who learns a user's UUID could forge "dev:<base64(uuid)>"
+    # and fully impersonate that account, bypassing SuperTokens entirely.
+    from core.auth.config import get_supertokens_enabled
+
+    if token.startswith("dev:") and not get_supertokens_enabled():
         try:
             import base64
             user_id = base64.urlsafe_b64decode(token[4:].encode()).decode()
