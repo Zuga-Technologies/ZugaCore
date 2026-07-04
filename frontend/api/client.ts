@@ -52,7 +52,9 @@ export function redirectToLogin(reason: 'expired' | 'required' = 'expired'): voi
   clearSession()
   if (typeof window === 'undefined') return
   const path = window.location.pathname
-  if (path === '/login') return
+  // /auth/callback is mid-OAuth: a background 401 (boot-time checkAuth racing the
+  // token exchange) must NOT navigate away or it kills the in-flight login.
+  if (path === '/login' || path.startsWith('/auth/callback')) return
   try {
     sessionStorage.setItem(AUTH_REASON_KEY, reason)
     // Don't loop the user back to a transient API path; remember the page.
