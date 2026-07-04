@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -536,41 +537,104 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
     return LoginResponse(token=token, refresh_token=refresh_token, user=_user_dict(user))
 
 
+# ── OAuth code replay guard ────────────────────────────────────────
+# Mobile browsers kill in-flight fetches when the tab backgrounds during the
+# provider round-trip, and the frontend replays the POST on resume. OAuth codes
+# are single-use, so the replay's exchange fails at the provider while the
+# original's response is lost — the user sees a failed login despite a session
+# existing. Serialize exchanges per code and reuse the first result so the
+# replay gets a valid session of its own.
+_oauth_code_locks: dict[str, asyncio.Lock] = {}
+_oauth_code_results: dict[str, tuple[float, dict]] = {}
+_OAUTH_CODE_TTL_SECONDS = 300.0
+
+
+def _prune_oauth_codes() -> None:
+    now = time.monotonic()
+    for code, (ts, _) in list(_oauth_code_results.items()):
+        if now - ts > _OAUTH_CODE_TTL_SECONDS:
+            _oauth_code_results.pop(code, None)
+            _oauth_code_locks.pop(code, None)
+
+
+async def _exchange_oauth_code(body: "OAuthLoginRequest") -> dict:
+    """Exchange the one-time code with the provider, deduping replays.
+
+    Returns the identity fields needed downstream. Raises 400 (never 500) when
+    the provider rejects the exchange or the profile fetch fails.
+    """
+    lock = _oauth_code_locks.setdefault(body.code, asyncio.Lock())
+    async with lock:
+        cached = _oauth_code_results.get(body.code)
+        if cached is not None:
+            logger.info("[oauth] duplicate %s exchange for a just-used code — reusing result", body.provider)
+            return cached[1]
+
+        from supertokens_python.recipe.thirdparty.asyncio import get_provider
+        provider = await get_provider("public", body.provider)
+        if provider is None:
+            raise HTTPException(status_code=400, detail=f"Provider '{body.provider}' not configured")
+
+        from supertokens_python.recipe.thirdparty.provider import RedirectUriInfo
+        from supertokens_python.recipe.thirdparty.types import UserInfo
+        tokens = await provider.exchange_auth_code_for_oauth_tokens(
+            redirect_uri_info=RedirectUriInfo(
+                redirect_uri_on_provider_dashboard=body.redirect_uri or "",
+                redirect_uri_query_params={"code": body.code},
+            ),
+            user_context={},
+        )
+        if not isinstance(tokens, dict) or not tokens.get("access_token"):
+            # Provider returned an error body (expired/reused code, etc.) —
+            # SuperTokens passes it through without checking.
+            logger.warning("[oauth] %s code exchange returned no access_token: %r", body.provider, tokens)
+            raise HTTPException(
+                status_code=400,
+                detail="Sign-in expired or already used — please try again.",
+            )
+
+        try:
+            user_info: UserInfo = await provider.get_user_info(tokens, user_context={})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("[oauth] %s get_user_info failed: %r", body.provider, exc)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not fetch your {body.provider} profile — please try again.",
+            )
+
+        if not user_info.email or not user_info.email.id:
+            raise HTTPException(status_code=400, detail="Could not get email from OAuth provider")
+
+        result = {
+            "third_party_user_id": user_info.third_party_user_id,
+            "email": user_info.email.id.lower(),
+            "is_verified": user_info.email.is_verified if user_info.email.is_verified is not None else False,
+            "name": getattr(user_info, "name", None),
+            "avatar_url": getattr(user_info, "avatar_url", None),
+        }
+        _oauth_code_results[body.code] = (time.monotonic(), result)
+        _prune_oauth_codes()
+        return result
+
+
 @router.post("/oauth", response_model=LoginResponse)
 async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
     """Universal OAuth login for Microsoft, GitHub, Apple."""
     if body.provider == "google" and body.credential:
         return await google_login(GoogleLoginRequest(credential=body.credential))
 
-    from supertokens_python.recipe.thirdparty.asyncio import get_provider
-    provider = await get_provider("public", body.provider)
-    if provider is None:
-        raise HTTPException(status_code=400, detail=f"Provider '{body.provider}' not configured")
-
-    # Exchange code for tokens and user info
-    from supertokens_python.recipe.thirdparty.provider import RedirectUriInfo
-    from supertokens_python.recipe.thirdparty.types import UserInfo
-    tokens = await provider.exchange_auth_code_for_oauth_tokens(
-        redirect_uri_info=RedirectUriInfo(
-            redirect_uri_on_provider_dashboard=body.redirect_uri or "",
-            redirect_uri_query_params={"code": body.code},
-        ),
-        user_context={},
-    )
-    user_info: UserInfo = await provider.get_user_info(tokens, user_context={})
-
-    if not user_info.email or not user_info.email.id:
-        raise HTTPException(status_code=400, detail="Could not get email from OAuth provider")
-
-    email = user_info.email.id.lower()
+    info = await _exchange_oauth_code(body)
+    email: str = info["email"]
     await _check_invite(email)
 
     st_result = await manually_create_or_update_user(
         tenant_id="public",
         third_party_id=body.provider,
-        third_party_user_id=user_info.third_party_user_id,
+        third_party_user_id=info["third_party_user_id"],
         email=email,
-        is_verified=user_info.email.is_verified if user_info.email.is_verified is not None else False,
+        is_verified=info["is_verified"],
     )
 
     if not isinstance(st_result, ManuallyCreateOrUpdateUserOkResult):
@@ -578,8 +642,8 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
 
     record = await upsert_user(
         email=email,
-        name=getattr(user_info, "name", None),
-        avatar_url=getattr(user_info, "avatar_url", None),
+        name=info["name"],
+        avatar_url=info["avatar_url"],
         auth_provider=body.provider,
     )
     await link_supertokens_id(email, st_result.user.id)
