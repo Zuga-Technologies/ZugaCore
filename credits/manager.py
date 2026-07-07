@@ -38,6 +38,28 @@ class InsufficientTokensError(Exception):
     """Raised when a wallet can't cover a requested debit (maps to HTTP 402)."""
 
 
+# ── Placeholder / sentinel user_id guard ────────────────────────────────
+# A caller that hasn't obtained a real authenticated user_id might pass a
+# placeholder like "default" or "anonymous". Allowing that through merges
+# ALL such callers into one shared wallet — the "default bucket" regression
+# (grew from 23 to 34 call sites across the org Feb→Apr). Any value in this
+# set is hard-blocked at the manager level so no caller — route, S2S studio,
+# or otherwise — can accidentally reintroduce the bug.
+_BANNED_USER_IDS: frozenset[str] = frozenset({
+    "default", "", "anonymous", "none", "null", "system", "anon",
+    "undefined", "unknown",
+})
+
+
+def _validate_user_id(user_id: str) -> None:
+    """Raise ValueError if user_id is a known placeholder that creates a shared bucket."""
+    if user_id.strip().lower() in _BANNED_USER_IDS:
+        raise ValueError(
+            f"user_id={user_id!r} is a reserved placeholder. "
+            "Obtain a real authenticated user ID before billing operations."
+        )
+
+
 # TOCTOU race protection for try_spend lives at the DB layer via
 # SELECT ... FOR UPDATE (see _get_or_create_balance(for_update=True)).
 # Postgres enforces a row lock that holds across all worker processes;
@@ -236,6 +258,7 @@ async def can_spend(user_id: str, email: str, estimated_tokens: float = 0) -> bo
     WARNING: This is a non-atomic read. For spend operations, use try_spend()
     which holds a per-user lock across check+deduct to prevent TOCTOU races.
     """
+    _validate_user_id(user_id)
     if _is_unlimited(email):
         # Verify this email actually belongs to this user_id to prevent
         # a caller from passing admin_email + victim_user_id
@@ -289,6 +312,7 @@ async def try_spend(
     This is the PREFERRED way to spend tokens. Use this instead of
     separate can_spend() + record_spend() calls.
     """
+    _validate_user_id(user_id)
     # Admins bypass the gate but still get audited
     if _is_unlimited(email):
         stored_email = await _get_user_email(user_id)
@@ -444,6 +468,7 @@ async def record_spend(
     from the stored UserRecord. This protects admin wallets from any
     standalone-studio path (e.g. /api/credits/report-spend) that lands here.
     """
+    _validate_user_id(user_id)
     admin_email = await _get_user_email(user_id)
     if admin_email and _is_unlimited(admin_email):
         await _record_admin_spend(user_id, tokens, cost_usd, service, reason, model, metadata)
@@ -603,6 +628,7 @@ async def grant_tokens(
     stripe_id: str | None = None,
 ) -> dict:
     """Admin: grant bonus tokens to a user (added to purchased bucket)."""
+    _validate_user_id(user_id)
     if tokens <= 0:
         raise ValueError(f"tokens must be positive, got {tokens}")
     async with get_session() as session:
