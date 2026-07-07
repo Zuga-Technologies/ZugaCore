@@ -18,6 +18,7 @@ from core.auth.models import CurrentUser, UserRecord
 from core.auth.repository import _is_admin_email
 from core.credits.manager import (
     _get_welcome_tokens,
+    _validate_user_id,
     add_purchased_tokens,
     add_subscription_tokens,
     can_spend,
@@ -152,6 +153,10 @@ async def gamer_balance(request: Request) -> dict:
             raise HTTPException(status_code=401, detail="Authentication required")
 
     user_id = await _resolve_overlay_user_id(user_id)
+    try:
+        _validate_user_id(user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     balance = await get_balance(user_id)
     return balance
 
@@ -533,15 +538,18 @@ async def overlay_token_spend(body: OverlaySpendRequest, request: Request) -> di
     # Atomic check-and-deduct: holds a per-user lock across check + deduct
     # so two concurrent overlay spends for the same user can't both pass and
     # drain the wallet below zero. Returns False if insufficient tokens.
-    success = await try_spend(
-        user_id=user_id,
-        email=email,
-        tokens=body.amount,
-        cost_usd=cost_usd,
-        service=body.source,
-        reason=body.reason,
-        model=None,
-    )
+    try:
+        success = await try_spend(
+            user_id=user_id,
+            email=email,
+            tokens=body.amount,
+            cost_usd=cost_usd,
+            service=body.source,
+            reason=body.reason,
+            model=None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not success:
         balance = await get_balance(user_id)
         raise HTTPException(
@@ -587,7 +595,10 @@ async def check_can_spend(
     _key: str = Depends(_verify_service_key),
 ) -> dict:
     """Check if a user can spend tokens. Service-to-service only."""
-    allowed = await can_spend(body.user_id, body.email, body.estimated_tokens)
+    try:
+        allowed = await can_spend(body.user_id, body.email, body.estimated_tokens)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not allowed:
         balance = await get_balance(body.user_id)
         return {"allowed": False, "balance": balance}
@@ -606,7 +617,10 @@ async def service_grant(
     without going through the user-admin path. Returns the manager's
     `{tokens_granted, new_total}` shape.
     """
-    result = await grant_tokens(body.user_id, body.amount, body.reason)
+    try:
+        result = await grant_tokens(body.user_id, body.amount, body.reason)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     logger.info(
         "Service grant: user=%s amount=%.1f reason=%s",
         body.user_id, body.amount, body.reason,
@@ -627,15 +641,18 @@ async def report_spend(
         if len(serialized) > 4096:
             meta = {"truncated": True, "original_keys": list(meta.keys())[:20]}
 
-    await record_spend(
-        user_id=body.user_id,
-        tokens=body.tokens,
-        cost_usd=body.cost_usd,
-        service=body.service,
-        reason=body.reason,
-        model=body.model,
-        metadata=meta,
-    )
+    try:
+        await record_spend(
+            user_id=body.user_id,
+            tokens=body.tokens,
+            cost_usd=body.cost_usd,
+            service=body.service,
+            reason=body.reason,
+            model=body.model,
+            metadata=meta,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     logger.info(
         "Service spend reported: user=%s tokens=%.1f service=%s reason=%s",
         body.user_id, body.tokens, body.service, body.reason,
