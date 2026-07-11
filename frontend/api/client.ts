@@ -52,9 +52,7 @@ export function redirectToLogin(reason: 'expired' | 'required' = 'expired'): voi
   clearSession()
   if (typeof window === 'undefined') return
   const path = window.location.pathname
-  // /auth/callback is mid-OAuth: a background 401 (boot-time checkAuth racing the
-  // token exchange) must NOT navigate away or it kills the in-flight login.
-  if (path === '/login' || path.startsWith('/auth/callback')) return
+  if (path === '/login') return
   try {
     sessionStorage.setItem(AUTH_REASON_KEY, reason)
     // Don't loop the user back to a transient API path; remember the page.
@@ -128,14 +126,24 @@ export class ApiError extends Error {
   }
 }
 
-async function rawFetch(method: string, path: string, body: unknown, token: string | null): Promise<Response> {
+async function rawFetch(method: string, path: string, body: unknown, token: string | null, timeoutMs?: number): Promise<Response> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (token) headers['Authorization'] = `Bearer ${token}`
-  return fetch(path, {
+  const opts: RequestInit = {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
+  }
+  if (!timeoutMs) return fetch(path, opts)
+  // AbortSignal.timeout would be simpler but isn't safe to assume everywhere
+  // this bundle runs (older embedded webviews) — build it by hand.
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(path, { ...opts, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // Mobile browsers kill in-flight fetches when the tab is backgrounded. The
@@ -154,21 +162,37 @@ function waitForVisible(): Promise<void> {
   })
 }
 
-async function fetchWithResumeRetry(method: string, path: string, body: unknown, token: string | null): Promise<Response> {
+async function fetchWithResumeRetry(method: string, path: string, body: unknown, token: string | null, timeoutMs?: number): Promise<Response> {
   try {
-    return await rawFetch(method, path, body, token)
+    return await rawFetch(method, path, body, token, timeoutMs)
   } catch (err) {
     if (!(err instanceof TypeError)) throw err
     await waitForVisible()
-    return rawFetch(method, path, body, token)
+    return rawFetch(method, path, body, token, timeoutMs)
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+// Distinguishable from a normal ApiError so callers can offer "retry" instead
+// of a generic failure message when a request was aborted client-side rather
+// than rejected by the server.
+export class ApiTimeoutError extends Error {
+  constructor() {
+    super('Request timed out')
+    this.name = 'ApiTimeoutError'
+  }
+}
+
+async function request<T>(method: string, path: string, body?: unknown, timeoutMs?: number): Promise<T> {
   // Don't refresh-and-retry the refresh endpoint itself — would infinite loop.
   const isRefreshCall = path === '/api/auth/session/refresh'
   let token = getToken()
-  let res = await fetchWithResumeRetry(method, path, body, token)
+  let res: Response
+  try {
+    res = await fetchWithResumeRetry(method, path, body, token, timeoutMs)
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') throw new ApiTimeoutError()
+    throw err
+  }
 
   if (res.status === 401 && !isRefreshCall) {
     // Only attempt refresh when we actually had a token to refresh. A 401 with
@@ -180,7 +204,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       if (newToken) {
         // Retry once with fresh token.
         token = newToken
-        res = await fetchWithResumeRetry(method, path, body, token)
+        res = await fetchWithResumeRetry(method, path, body, token, timeoutMs)
       }
     }
     // Still 401 (refresh failed, or no token to begin with)? Session is dead —
@@ -205,9 +229,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>('GET', path),
-  post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
-  put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
-  patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
-  delete: <T>(path: string) => request<T>('DELETE', path),
+  get: <T>(path: string, timeoutMs?: number) => request<T>('GET', path, undefined, timeoutMs),
+  post: <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>('POST', path, body, timeoutMs),
+  put: <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>('PUT', path, body, timeoutMs),
+  patch: <T>(path: string, body?: unknown, timeoutMs?: number) => request<T>('PATCH', path, body, timeoutMs),
+  delete: <T>(path: string, timeoutMs?: number) => request<T>('DELETE', path, undefined, timeoutMs),
 }
