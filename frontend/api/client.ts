@@ -210,7 +210,14 @@ async function request<T>(method: string, path: string, body?: unknown, timeoutM
     // Still 401 (refresh failed, or no token to begin with)? Session is dead —
     // clear and bounce to login with a reason + return path so the user can
     // sign back in and land where they were instead of silently failing.
-    if (res.status === 401) {
+    // Exception: /api/auth/me is a speculative "am I logged in?" probe (the
+    // router's one-shot hydration check fires it on EVERY page load, public
+    // or not). A 401 from it just means "no" — not a session that died mid-
+    // use. Hard-redirecting here was firing on every anonymous visit to any
+    // public page (landing, login, register) before the router guard ever
+    // got a chance to route them correctly. Found 2026-08-06: it silently
+    // made the marketing landing page unreachable for anyone logged out.
+    if (res.status === 401 && path !== '/api/auth/me') {
       redirectToLogin(token ? 'expired' : 'required')
     }
   }
