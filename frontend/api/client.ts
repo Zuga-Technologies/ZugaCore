@@ -182,6 +182,16 @@ export class ApiTimeoutError extends Error {
   }
 }
 
+// A tokenless session (LOCAL_MODE / ZugaDesktop) authenticates successfully
+// against /api/auth/me with no token at all. Once that's proven true this
+// page-load, a LATER 401 from an unrelated downstream call (e.g. a
+// Zugabot-brain proxy route that has no notion of the local identity) must
+// NOT be treated as "you got logged out" -- that was the exact mechanism
+// behind an infinite /docs/social <-> /login redirect loop under LOCAL_MODE
+// (found 2026-08-04): one background widget's proxied call 401s, the whole
+// session got nuked, re-hydration via /api/auth/me succeeded again, repeat.
+let tokenlessSessionConfirmed = false
+
 async function request<T>(method: string, path: string, body?: unknown, timeoutMs?: number): Promise<T> {
   // Don't refresh-and-retry the refresh endpoint itself — would infinite loop.
   const isRefreshCall = path === '/api/auth/session/refresh'
@@ -210,9 +220,15 @@ async function request<T>(method: string, path: string, body?: unknown, timeoutM
     // Still 401 (refresh failed, or no token to begin with)? Session is dead —
     // clear and bounce to login with a reason + return path so the user can
     // sign back in and land where they were instead of silently failing.
-    if (res.status === 401) {
+    // Exception: a confirmed tokenless (LOCAL_MODE) session — this 401 is a
+    // downstream call that doesn't recognize the local identity, not a logout.
+    if (res.status === 401 && !(!token && tokenlessSessionConfirmed)) {
       redirectToLogin(token ? 'expired' : 'required')
     }
+  }
+
+  if (res.ok && !token && path === '/api/auth/me') {
+    tokenlessSessionConfirmed = true
   }
 
   if (!res.ok) {
