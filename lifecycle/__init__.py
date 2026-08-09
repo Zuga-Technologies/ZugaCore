@@ -7,6 +7,6 @@ Usage in any studio's main.py:
     add_lifecycle_support(app, prefix="/api/trader")
 """
 
-from .middleware import add_lifecycle_support, request_shutdown
+from .middleware import add_lifecycle_support, request_shutdown, start_idle_watchdog
 
-__all__ = ["add_lifecycle_support", "request_shutdown"]
+__all__ = ["add_lifecycle_support", "request_shutdown", "start_idle_watchdog"]
