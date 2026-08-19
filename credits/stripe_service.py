@@ -92,8 +92,15 @@ TOPUP_PACKS = {
     },
     "bulk": {
         "price_env": "STRIPE_PRICE_TOPUP_BULK",
-        "tokens": 3500,
-        "label": "3,500 tokens — $25",
+        "tokens": 3125,
+        # Was 3500 (0.714c/token) -- cheaper per-token than the Power
+        # subscription (0.737c/token), which meant there was never a reason
+        # to subscribe instead of just buying one-off top-ups. 3125 puts
+        # this at 0.8c/token: still the best-value top-up (beats Best
+        # Value's 0.833c) without ever beating a subscription's rate, same
+        # shape as every competitor checked (Poe/RunwayML/ElevenLabs/Zapier/
+        # Midjourney) where committing to a subscription always wins.
+        "label": "3,125 tokens — $25",
     },
 }
 
