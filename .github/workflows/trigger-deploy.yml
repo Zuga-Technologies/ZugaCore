@@ -1,4 +1,4 @@
-name: Trigger ZugaApp Deploy
+name: Trigger ZugaPlatform Deploy
 
 on:
   push:
@@ -8,6 +8,6 @@ jobs:
   notify-zugaapp:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger ZugaApp redeploy
+      - name: Trigger ZugaPlatform redeploy
         run: |
-          curl -X POST             -H "Accept: application/vnd.github.v3+json"             -H "Authorization: token ${{ secrets.DEPLOY_PAT }}"             https://api.github.com/repos/Zuga-Technologies/ZugaApp/dispatches             -d '{"event_type":"studio-updated","client_payload":{"studio":"core"}}'
+          curl -X POST             -H "Accept: application/vnd.github.v3+json"             -H "Authorization: token ${{ secrets.DEPLOY_PAT }}"             https://api.github.com/repos/Zuga-Technologies/ZugaPlatform/dispatches             -d '{"event_type":"studio-updated","client_payload":{"studio":"core"}}'
