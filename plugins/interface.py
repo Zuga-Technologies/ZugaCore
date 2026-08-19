@@ -1,13 +1,13 @@
 """Studio plugin contracts — the abstract base classes every studio inherits from.
 
 ZugaCore only defines the contracts here. The actual plugin discovery and
-registration code lives in ZugaApp/backend/plugins/loader.py, which walks
+registration code lives in ZugaPlatform/backend/plugins/loader.py, which walks
 each studio's directory looking for a plugin.py file, imports it, and
 dispatches on StudioPlugin vs ProxyPlugin via isinstance checks.
 
 Two plugin types:
 
-    StudioPlugin — runs inside ZugaApp, shares its database. Use for
+    StudioPlugin — runs inside ZugaPlatform, shares its database. Use for
                    feature studios like ZugaLife, ZugaLearn, ZugaAudio
                    where the frontend is the product and the backend
                    lives in the same process.
@@ -27,7 +27,7 @@ from fastapi import APIRouter
 
 
 class StudioPlugin(ABC):
-    """Embedded studio — runs inside ZugaApp, shares its database.
+    """Embedded studio — runs inside ZugaPlatform, shares its database.
 
     Use for feature studios like ZugaLife where the frontend IS the product.
     """
@@ -70,11 +70,11 @@ class StudioPlugin(ABC):
         return []
 
     async def on_startup(self) -> None:
-        """Called when ZugaApp starts. Optional setup work."""
+        """Called when ZugaPlatform starts. Optional setup work."""
         pass
 
     async def on_shutdown(self) -> None:
-        """Called when ZugaApp shuts down. Optional cleanup."""
+        """Called when ZugaPlatform shuts down. Optional cleanup."""
         pass
 
 
@@ -82,7 +82,7 @@ class ProxyPlugin(ABC):
     """Proxy studio — forwards requests to a standalone backend.
 
     Use for studios that run their own backend 24/7 (like ZugaTrader).
-    ZugaApp becomes a pass-through window + remote control.
+    ZugaPlatform becomes a pass-through window + remote control.
     """
 
     @property
@@ -119,14 +119,14 @@ class ProxyPlugin(ABC):
         """Events this studio can emit (via POST /api/events/emit).
 
         Proxy studios declare their catalog here for the webhook UI,
-        but actually emit events by POSTing to ZugaApp's internal endpoint.
+        but actually emit events by POSTing to ZugaPlatform's internal endpoint.
         """
         return []
 
     async def on_startup(self) -> None:
-        """Called when ZugaApp starts. Use to verify standalone is reachable."""
+        """Called when ZugaPlatform starts. Use to verify standalone is reachable."""
         pass
 
     async def on_shutdown(self) -> None:
-        """Called when ZugaApp shuts down. Usually a no-op."""
+        """Called when ZugaPlatform shuts down. Usually a no-op."""
         pass
