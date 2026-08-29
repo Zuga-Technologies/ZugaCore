@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import secrets
 import time
 from collections import defaultdict
 
@@ -23,55 +22,14 @@ def _check_rate_limit(key: str, max_requests: int, window_seconds: int) -> None:
         raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
     bucket.append(now)
 
-# ── One-time desktop handoff codes (D55) ──────────────────────────
-#
-# The desktop login handoff used to put a live access token AND a long-lived
-# refresh token directly in the `zugagamer://callback?token=...` deep link.
-# On Windows a protocol launch arrives as a COMMAND LINE argument, and any
-# process running as the same user can read another process's command line
-# (WMI, Task Manager's "Command line" column, plain ps on macOS/Linux). So the
-# credentials sat in readable process metadata for the life of the app.
-#
-# Instead the deep link now carries a single-use code that is worthless on its
-# own: it must be exchanged over HTTPS, it dies after one use, and it expires
-# in two minutes. Reading it off the command line a minute later gets nothing,
-# because the desktop app has already spent it.
-#
-# In-memory on purpose, matching _rate_buckets above. The TTL is 120s, so the
-# worst case on a deploy/restart is "a login in flight in that window has to be
-# retried" — not worth a Redis dependency. If this service is ever run
-# multi-instance, this must move to shared storage or the exchange will 400
-# whenever the two requests land on different instances.
-_DESKTOP_CODE_TTL_SECONDS = 120
-_desktop_codes: dict[str, tuple[float, str, str]] = {}
-
-
-def _purge_expired_desktop_codes(now: float) -> None:
-    for code in [c for c, (exp, _, _) in _desktop_codes.items() if exp <= now]:
-        _desktop_codes.pop(code, None)
-
-
-def _store_desktop_code(token: str, refresh_token: str) -> tuple[str, int]:
-    """Stash a freshly minted token pair behind a single-use code."""
-    now = time.monotonic()
-    _purge_expired_desktop_codes(now)
-    code = secrets.token_urlsafe(32)
-    _desktop_codes[code] = (now + _DESKTOP_CODE_TTL_SECONDS, token, refresh_token)
-    return code, _DESKTOP_CODE_TTL_SECONDS
-
-
-def _consume_desktop_code(code: str) -> tuple[str, str] | None:
-    """Redeem a code. Returns None if unknown, already spent, or expired."""
-    now = time.monotonic()
-    _purge_expired_desktop_codes(now)
-    entry = _desktop_codes.pop(code, None)   # pop = single use, even on a race
-    if entry is None:
-        return None
-    expires_at, token, refresh_token = entry
-    if expires_at <= now:
-        return None
-    return token, refresh_token
-
+# One-time desktop handoff codes (D55) live in their own pure module so the
+# properties that make the handoff safe -- single use, TTL, unguessable --
+# can actually be tested. Importing this file requires the whole supertokens
+# stack, which made them untestable and therefore taken on faith.
+from auth.desktop_handoff import (  # noqa: E402
+    consume_code as _consume_desktop_code,
+    store_code as _store_desktop_code,
+)
 
 from supertokens_python.recipe.emailpassword.asyncio import sign_up, sign_in
 from supertokens_python.recipe.emailpassword.interfaces import (
