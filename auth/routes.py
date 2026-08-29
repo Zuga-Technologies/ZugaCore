@@ -26,7 +26,7 @@ def _check_rate_limit(key: str, max_requests: int, window_seconds: int) -> None:
 # properties that make the handoff safe -- single use, TTL, unguessable --
 # can actually be tested. Importing this file requires the whole supertokens
 # stack, which made them untestable and therefore taken on faith.
-from auth.desktop_handoff import (  # noqa: E402
+from core.auth.desktop_handoff import (  # noqa: E402
     consume_code as _consume_desktop_code,
     store_code as _store_desktop_code,
 )
