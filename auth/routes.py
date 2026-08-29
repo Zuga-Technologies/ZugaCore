@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import secrets
 import time
 from collections import defaultdict
 
@@ -21,6 +22,56 @@ def _check_rate_limit(key: str, max_requests: int, window_seconds: int) -> None:
     if len(bucket) >= max_requests:
         raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
     bucket.append(now)
+
+# ── One-time desktop handoff codes (D55) ──────────────────────────
+#
+# The desktop login handoff used to put a live access token AND a long-lived
+# refresh token directly in the `zugagamer://callback?token=...` deep link.
+# On Windows a protocol launch arrives as a COMMAND LINE argument, and any
+# process running as the same user can read another process's command line
+# (WMI, Task Manager's "Command line" column, plain ps on macOS/Linux). So the
+# credentials sat in readable process metadata for the life of the app.
+#
+# Instead the deep link now carries a single-use code that is worthless on its
+# own: it must be exchanged over HTTPS, it dies after one use, and it expires
+# in two minutes. Reading it off the command line a minute later gets nothing,
+# because the desktop app has already spent it.
+#
+# In-memory on purpose, matching _rate_buckets above. The TTL is 120s, so the
+# worst case on a deploy/restart is "a login in flight in that window has to be
+# retried" — not worth a Redis dependency. If this service is ever run
+# multi-instance, this must move to shared storage or the exchange will 400
+# whenever the two requests land on different instances.
+_DESKTOP_CODE_TTL_SECONDS = 120
+_desktop_codes: dict[str, tuple[float, str, str]] = {}
+
+
+def _purge_expired_desktop_codes(now: float) -> None:
+    for code in [c for c, (exp, _, _) in _desktop_codes.items() if exp <= now]:
+        _desktop_codes.pop(code, None)
+
+
+def _store_desktop_code(token: str, refresh_token: str) -> tuple[str, int]:
+    """Stash a freshly minted token pair behind a single-use code."""
+    now = time.monotonic()
+    _purge_expired_desktop_codes(now)
+    code = secrets.token_urlsafe(32)
+    _desktop_codes[code] = (now + _DESKTOP_CODE_TTL_SECONDS, token, refresh_token)
+    return code, _DESKTOP_CODE_TTL_SECONDS
+
+
+def _consume_desktop_code(code: str) -> tuple[str, str] | None:
+    """Redeem a code. Returns None if unknown, already spent, or expired."""
+    now = time.monotonic()
+    _purge_expired_desktop_codes(now)
+    entry = _desktop_codes.pop(code, None)   # pop = single use, even on a race
+    if entry is None:
+        return None
+    expires_at, token, refresh_token = entry
+    if expires_at <= now:
+        return None
+    return token, refresh_token
+
 
 from supertokens_python.recipe.emailpassword.asyncio import sign_up, sign_in
 from supertokens_python.recipe.emailpassword.interfaces import (
@@ -154,6 +205,16 @@ class RefreshRequest(BaseModel):
 class RefreshResponse(BaseModel):
     token: str
     refresh_token: str
+
+
+class DesktopCodeResponse(BaseModel):
+    """A single-use handoff code — deliberately carries no token (D55)."""
+    code: str
+    expires_in: int
+
+
+class DesktopExchangeRequest(BaseModel):
+    code: str
 
 
 class MessageResponse(BaseModel):
@@ -732,6 +793,64 @@ async def mint_session_for_desktop(
         raise HTTPException(status_code=400, detail="User has no SuperTokens ID")
 
     token, refresh_token = await _create_session(record.supertokens_user_id)
+    return RefreshResponse(token=token, refresh_token=refresh_token)
+
+
+@router.post("/session/for-desktop/code", response_model=DesktopCodeResponse)
+async def mint_desktop_handoff_code(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> DesktopCodeResponse:
+    """Mint a desktop session, but hand back only a single-use code (D55).
+
+    Same job as /session/for-desktop above, with the tokens kept server-side.
+    LoginView puts this code in the protocol URL instead of the tokens, and the
+    desktop app exchanges it below. See the _desktop_codes note for why the deep
+    link is not a safe place for a credential.
+
+    /session/for-desktop is deliberately KEPT: desktop builds already installed
+    do not know about this flow, and breaking their login to fix an exposure
+    they can also fix by updating would be the worse trade. New builds ask for
+    the code flow explicitly (`desktop_auth=code`).
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"desktop-mint:{client_ip}", max_requests=10, window_seconds=60)
+
+    record = await get_user_by_email(user.email)
+    if record is None or not record.supertokens_user_id:
+        raise HTTPException(status_code=400, detail="User has no SuperTokens ID")
+
+    token, refresh_token = await _create_session(record.supertokens_user_id)
+    code, expires_in = _store_desktop_code(token, refresh_token)
+    return DesktopCodeResponse(code=code, expires_in=expires_in)
+
+
+@router.post("/session/for-desktop/exchange", response_model=RefreshResponse)
+async def exchange_desktop_handoff_code(
+    request: Request,
+    body: DesktopExchangeRequest,
+) -> RefreshResponse:
+    """Redeem a one-time code for the token pair it stands for (D55).
+
+    Intentionally UNauthenticated: the code is itself the credential, and the
+    desktop app has no session yet — that is the whole point of the handoff.
+    Safe because the code is 256 bits of randomness, dies on first use, and
+    expires in two minutes.
+
+    Rate-limited per IP anyway. Not because guessing is plausible at this
+    entropy, but because an unauthenticated endpoint that does a dict lookup is
+    exactly the shape you do not want left un-throttled.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"desktop-exchange:{client_ip}", max_requests=20, window_seconds=60)
+
+    pair = _consume_desktop_code(body.code)
+    if pair is None:
+        # One message for unknown / already-spent / expired — do not tell a
+        # caller which of the three it was.
+        raise HTTPException(status_code=400, detail="Invalid or expired handoff code")
+
+    token, refresh_token = pair
     return RefreshResponse(token=token, refresh_token=refresh_token)
 
 
