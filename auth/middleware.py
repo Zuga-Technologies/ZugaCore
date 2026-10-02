@@ -106,10 +106,15 @@ async def _validate_token(token: str) -> CurrentUser | None:
             logger.warning("SuperTokens session valid but no UserRecord for st_id=%s", st_user_id)
             return None
 
+        # An admin role is only honoured for a VERIFIED email. upsert_user() stamps
+        # role="admin" on any allowlisted address at registration, before anyone has
+        # proven they own it, and SuperTokens' built-in sign-in skips the app's
+        # verify-your-email check.
+        role = record.role if record.email_verified else "user"
         return CurrentUser(
             id=record.id,
             email=record.email,
-            role=record.role,
+            role=role,
             name=record.name,
             avatar_url=record.avatar_url,
         )

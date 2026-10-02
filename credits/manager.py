@@ -262,13 +262,16 @@ async def can_spend(user_id: str, email: str, estimated_tokens: float = 0) -> bo
     if _is_unlimited(email):
         # Verify this email actually belongs to this user_id to prevent
         # a caller from passing admin_email + victim_user_id
-        stored_email = await _get_user_email(user_id)
-        if stored_email and stored_email.lower() != email.lower():
+        ident = await _get_user_identity(user_id)
+        if ident and ident[0].lower() != email.lower():
             logger.warning(
                 "Admin bypass rejected: provided email=%s doesn't match stored=%s for user=%s",
-                email, stored_email, user_id,
+                email, ident[0], user_id,
             )
             # Fall through to normal token check instead of granting unlimited
+        elif ident and not ident[1]:
+            # Allowlisted address, but nobody has proven they own the mailbox.
+            logger.warning("Admin bypass rejected: email not verified for user=%s", user_id)
         else:
             return True
 
@@ -315,8 +318,10 @@ async def try_spend(
     _validate_user_id(user_id)
     # Admins bypass the gate but still get audited
     if _is_unlimited(email):
-        stored_email = await _get_user_email(user_id)
-        if not stored_email or stored_email.lower() == email.lower():
+        ident = await _get_user_identity(user_id)
+        # No stored record (standalone studio) keeps the old behaviour; a stored record
+        # must match the email AND be verified, or the caller is spending as a normal user.
+        if not ident or (ident[0].lower() == email.lower() and ident[1]):
             # Admin confirmed — record spend for audit but don't deduct
             await _record_admin_spend(user_id, tokens, cost_usd, service, reason, model, metadata)
             return True
@@ -415,6 +420,27 @@ async def _record_admin_spend(
     logger.debug("Admin spend (audit only): user=%s tokens=%.1f ($%.4f)", user_id, tokens, cost_usd)
 
 
+async def _get_user_identity(user_id: str) -> tuple[str, bool] | None:
+    """(stored email, email_verified) for a user_id, or None if there is no record to check.
+
+    Admin used to be granted on the allowlisted email alone. An allowlisted address that was
+    never verified (registered by someone who does not own it) must not be admin.
+    """
+    try:
+        from core.auth.models import UserRecord
+        async with get_session() as session:
+            result = await session.execute(
+                select(UserRecord.email, UserRecord.email_verified).where(UserRecord.id == user_id)
+            )
+            row = result.first()
+            if row is None:
+                return None
+            return (row[0], bool(row[1]))
+    except Exception:
+        # If auth models aren't available (standalone studio), skip validation
+        return None
+
+
 async def _get_user_email(user_id: str) -> str | None:
     """Look up the stored email for a user_id. Returns None if not found."""
     try:
@@ -469,8 +495,8 @@ async def record_spend(
     standalone-studio path (e.g. /api/credits/report-spend) that lands here.
     """
     _validate_user_id(user_id)
-    admin_email = await _get_user_email(user_id)
-    if admin_email and _is_unlimited(admin_email):
+    ident = await _get_user_identity(user_id)
+    if ident and _is_unlimited(ident[0]) and ident[1]:
         await _record_admin_spend(user_id, tokens, cost_usd, service, reason, model, metadata)
         return
 
