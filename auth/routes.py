@@ -659,6 +659,16 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
 
     info = await _exchange_oauth_code(body)
     email: str = info["email"]
+    # A provider sign-in proves the mailbox only when the provider says it
+    # verified the address; SuperTokens passes that flag through (Google's
+    # email_verified claim, GitHub's per-email "verified"). Without it, an
+    # account at the provider carrying someone else's address would open the
+    # account that address has here (hivemind #502).
+    if not info["is_verified"]:
+        raise HTTPException(
+            status_code=401,
+            detail="Your sign-in provider has not verified this email address. Verify it there, then try again.",
+        )
     await _check_invite(email)
 
     st_result = await manually_create_or_update_user(
