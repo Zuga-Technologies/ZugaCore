@@ -88,8 +88,8 @@ async def get_user_by_email(email: str) -> UserRecord | None:
         return result.scalar_one_or_none()
 
 
-async def set_email_verified(email: str) -> None:
-    """Mark a user's email as verified."""
+async def set_email_verified(email: str, verified: bool = True) -> None:
+    """Mark a user's email as verified (or, with verified=False, as not verified)."""
     async with get_session() as session:
         result = await session.execute(
             select(UserRecord).where(UserRecord.email == email)
@@ -97,7 +97,18 @@ async def set_email_verified(email: str) -> None:
         user = result.scalar_one_or_none()
         if user is None:
             raise ValueError("User not found")
-        user.email_verified = True
+        user.email_verified = verified
+
+
+async def set_auth_provider(email: str, auth_provider: str) -> None:
+    """Record how the account signs in (the users.auth_provider label)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.email == email)
+        )
+        user = result.scalar_one_or_none()
+        if user is not None:
+            user.auth_provider = auth_provider
 
 
 async def get_user_by_supertokens_id(st_user_id: str) -> UserRecord | None:
@@ -130,11 +141,15 @@ async def link_supertokens_id(email: str, st_user_id: str) -> None:
 
 
 async def provision_allowed_emails() -> int:
-    """Auto-create verified user records for all ALLOWED_EMAILS entries.
+    """Auto-create user records for all ALLOWED_EMAILS entries.
 
-    Called at startup. Ensures every whitelisted email has a row in
-    the users table with email_verified=True so they can log in
-    immediately via any auth method (password, Google, GitHub).
+    Called at startup. Ensures every whitelisted email has a row, with its
+    role, in the users table. The row is NOT marked verified: ALLOWED_EMAILS
+    says who may sign up, not who owns the mailbox. It used to be, and every
+    boot also re-verified any unverified whitelisted row, which let whoever
+    registered a whitelisted address first become a verified user with its
+    role, admin included (hivemind #502). The owner proves the mailbox the
+    normal way: the link sent on /register, or a Google sign-in.
     Returns the number of newly created users.
     """
     import logging
@@ -156,14 +171,11 @@ async def provision_allowed_emails() -> int:
                     email=email,
                     auth_provider="pending",
                     role=role,
-                    email_verified=True,
+                    email_verified=False,
                 )
                 session.add(user)
                 _logger.info("Provisioned user: %s (role=%s)", email, role)
                 created += 1
-            elif not user.email_verified:
-                user.email_verified = True
-                _logger.info("Auto-verified existing user: %s", email)
 
     return created
 
