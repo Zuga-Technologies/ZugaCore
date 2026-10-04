@@ -10,7 +10,7 @@ places did the same thing by another door:
   * provision_allowed_emails() created every ALLOWED_EMAILS row already verified
     and re-verified unverified ones on every boot;
   * Google sign-in marked the address verified without reading Google's own
-    email_verified claim.
+    email_verified claim (fixed and tested underneath, in test_closed_doors.py).
 
 These tests drive the real route functions against an in-memory database (the
 `db` fixture). Only the outside world is faked: SuperTokens' sign_up/sign_in,
@@ -204,16 +204,20 @@ def test_clicking_the_link_verifies_and_then_login_works_with_the_role(auth):
 
 
 def test_password_made_outside_register_cannot_use_a_pre_verified_row(auth):
-    # A provisioned row nobody has registered yet, verified by an older deploy,
-    # plus a password created through SuperTokens' own /api/auth/st/signup
-    # (fake_sign_in accepts it): login must refuse, not hand over the admin row.
+    # A pre-made row linked to nobody, verified by an older deploy, plus a
+    # password user nobody linked (SuperTokens' own /api/auth/st/signup used to
+    # make them; fake_sign_in accepts it): login must not hand over the admin
+    # row. It does what /register does instead: link, unverify, send the link.
     _add_row(auth.db, id="pre", email=ADMIN_EMAIL, auth_provider="pending",
              role="admin", email_verified=True)
 
     with pytest.raises(HTTPException) as exc:
         _password_login(auth, ADMIN_EMAIL)
 
+    row = _record(auth.db, ADMIN_EMAIL)
     assert exc.value.status_code == 403
+    assert (row.supertokens_user_id, row.email_verified) == ("st-outside", False)
+    assert [to for to, _ in auth.sent] == [ADMIN_EMAIL]
 
 
 # ── startup provisioning ────────────────────────────────────────────────
@@ -236,56 +240,3 @@ def test_provisioning_does_not_re_verify_an_unverified_row_on_boot(auth):
     auth.db.run_until_complete(provision_allowed_emails())  # the next deploy boots
 
     assert _record(auth.db, ADMIN_EMAIL).email_verified is False
-
-
-# ── Google ──────────────────────────────────────────────────────────────
-
-
-def _google_claims(**overrides):
-    claims = {"iss": "accounts.google.com", "email": "g@example.com", "name": "G"}
-    claims.update(overrides)
-    return claims
-
-
-@pytest.mark.parametrize("claim", [False, "false", None])
-def test_google_credential_without_googles_own_verification_is_refused(monkeypatch, claim):
-    import core.auth.google as google
-
-    claims = _google_claims() if claim is None else _google_claims(email_verified=claim)
-    monkeypatch.setattr(google.id_token, "verify_oauth2_token", lambda *a, **k: claims)
-
-    with pytest.raises(HTTPException) as exc:
-        google.verify_google_token("credential", "client-id")
-
-    assert exc.value.status_code == 401
-
-
-@pytest.mark.parametrize("claim", [True, "true"])
-def test_google_credential_verified_by_google_is_accepted(monkeypatch, claim):
-    import core.auth.google as google
-
-    monkeypatch.setattr(
-        google.id_token, "verify_oauth2_token",
-        lambda *a, **k: _google_claims(email_verified=claim),
-    )
-
-    assert google.verify_google_token("credential", "client-id")["email"] == "g@example.com"
-
-
-def test_google_code_flow_without_googles_verification_is_refused(auth, monkeypatch):
-    async def unverified_exchange(body):
-        return {"third_party_user_id": "g-1", "email": ADMIN_EMAIL,
-                "is_verified": False, "name": None, "avatar_url": None}
-
-    async def must_not_create(**kwargs):
-        raise AssertionError("an account was created for an address Google did not verify")
-
-    monkeypatch.setattr(auth.routes, "_exchange_oauth_code", unverified_exchange)
-    monkeypatch.setattr(auth.routes, "manually_create_or_update_user", must_not_create)
-    body = auth.routes.OAuthLoginRequest(provider="google", code="one-time-code")
-
-    with pytest.raises(HTTPException) as exc:
-        auth.db.run_until_complete(auth.routes.oauth_login(body))
-
-    assert exc.value.status_code == 401
-    assert _record(auth.db, ADMIN_EMAIL) is None

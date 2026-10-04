@@ -13,18 +13,13 @@ by that link. Before this change:
      session. The caller was now that account.
 
 The same worked through our own /register on a Google-only account once the
-owner's next Google sign-in re-verified the row; and SuperTokens' own
-/api/auth/st/signin handed a session to any password user, verified or not.
+owner's next Google sign-in re-verified the row.
 
-Now: password login only accepts the SuperTokens user the row is linked to,
-and the built-in sign-up and sign-in HTTP routes are off. Session refresh and
-sign-out stay on, and so does the in-process sign_up() that /register uses.
+Now: password login only accepts the SuperTokens user the row is linked to, and
+/register answers 409 for an email whose row is already linked, before it makes
+any sign-in user. (The built-in sign-up and sign-in HTTP routes are off and
+tested underneath, in test_closed_doors.py.)
 """
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -108,18 +103,19 @@ def test_a_second_password_user_cannot_log_in_to_a_google_account(auth, monkeypa
     assert _who_is(auth, monkeypatch, "st-outside") is None
 
 
-def test_register_on_a_google_account_does_not_survive_the_owners_next_google_sign_in(auth, monkeypatch):
+def test_register_on_a_linked_account_is_refused_before_any_sign_in_user_is_made(auth, monkeypatch):
     _add_row(auth.db, id="boss", email=ADMIN_EMAIL, auth_provider="google", role="admin",
              email_verified=True, supertokens_user_id="st-google")
 
-    _register(auth, ADMIN_EMAIL)  # an attacker registers the owner's address
-    attacker = _record(auth.db, ADMIN_EMAIL).supertokens_user_id
-    assert attacker != "st-google"
-    _google_login(auth, monkeypatch, ADMIN_EMAIL)  # the owner signs in as usual
+    with pytest.raises(HTTPException) as exc:
+        _register(auth, ADMIN_EMAIL)  # an attacker registers the owner's address
 
-    _login_must_be_refused(auth, monkeypatch, ADMIN_EMAIL, attacker)
-
-    assert _who_is(auth, monkeypatch, attacker) is None
+    row = _record(auth.db, ADMIN_EMAIL)
+    assert exc.value.status_code == 409
+    assert (row.supertokens_user_id, row.email_verified) == ("st-google", True)
+    assert auth.sent == []
+    # and no password user was made, so there is nothing to log in with later
+    assert _google_login(auth, monkeypatch, ADMIN_EMAIL).user["id"] == "boss"
 
 
 # ── what must keep working ──────────────────────────────────────────────
@@ -173,43 +169,3 @@ def test_our_refresh_and_sign_out_still_work(auth, monkeypatch):
 
     assert (res.token, res.refresh_token) == ("a2", "r2")
     assert out == {"status": "logged_out"} and revoked == [True]
-
-
-# ── SuperTokens' own HTTP routes (fresh process: see st_routes_probe.py) ──
-
-
-@pytest.fixture(scope="module")
-def probe():
-    import core
-
-    pyroot = Path(core.__file__).parent.parent  # the directory `core` is imported from
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(pyroot), env.get("PYTHONPATH", "")) if p)
-    done = subprocess.run(
-        [sys.executable, str(Path(__file__).with_name("st_routes_probe.py"))],
-        env=env, capture_output=True, text=True, timeout=180,
-    )
-    assert done.returncode == 0, done.stderr[-3000:]
-    return json.loads(done.stdout.strip().splitlines()[-1])
-
-
-@pytest.mark.parametrize("path", ["/signup", "/signin"])
-def test_builtin_password_sign_up_and_sign_in_routes_are_off(probe, path):
-    assert probe["routes_on"][f"POST /api/auth/st{path}"] is False
-    # not handled by SuperTokens at all: the request falls through to the app,
-    # which here has no such route
-    for kind in ("empty", "filled"):
-        status, body = probe["answers"][path][kind]
-        assert status == 404 and "FIELD_ERROR" not in body and '"status":"OK"' not in body
-    assert probe["sign_up_calls_from_http"] == []
-
-
-@pytest.mark.parametrize("path", ["/session/refresh", "/signout"])
-def test_builtin_session_refresh_and_sign_out_routes_still_answer(probe, path):
-    assert probe["routes_on"][f"POST /api/auth/st{path}"] is True
-    status, body = probe["answers"][path]["empty"]
-    assert status == 401 and "unauthorised" in body  # SuperTokens' own answer, not a 404
-
-
-def test_register_still_creates_accounts_through_the_in_process_function(probe):
-    assert probe["in_process_sign_up"] == {"result": "created", "calls": ["via-register@example.com"]}

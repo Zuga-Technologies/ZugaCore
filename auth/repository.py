@@ -100,6 +100,17 @@ async def set_email_verified(email: str, verified: bool = True) -> None:
         user.email_verified = verified
 
 
+async def set_auth_provider(email: str, auth_provider: str) -> None:
+    """Record how the account signs in (the users.auth_provider label)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(UserRecord).where(UserRecord.email == email)
+        )
+        user = result.scalar_one_or_none()
+        if user is not None:
+            user.auth_provider = auth_provider
+
+
 async def get_user_by_supertokens_id(st_user_id: str) -> UserRecord | None:
     """Look up a user by their SuperTokens user ID."""
     async with get_session() as session:

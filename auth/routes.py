@@ -65,6 +65,7 @@ from core.auth.repository import (
     get_onboarding_state,
     get_user_by_email,
     link_supertokens_id,
+    set_auth_provider,
     set_email_verified,
     set_onboarding_state,
     upsert_user,
@@ -316,6 +317,44 @@ async def _enqueue_access_request(email: str) -> None:
         logger.error("[invite] admin notify failed for %s: %s", email, exc)
 
 
+# What a person is told about the verification email. When it could not be
+# sent, the account still exists (so /register would now answer 409); Forgot
+# password gets them in, because consuming a reset link also verifies the email.
+_VERIFY_EMAIL_SENT = "Account created — check your email to verify."
+_VERIFY_EMAIL_NOT_SENT = (
+    "Account created, but we could not send the verification email just now. "
+    "On the sign-in page, use Forgot password to get a link that verifies it."
+)
+_LOGIN_VERIFY_FIRST = (
+    "Please verify your email before logging in. "
+    "No email? Use Forgot password to get a new link."
+)
+_LOGIN_VERIFY_LINK_SENT = "Please verify your email before logging in. We just sent you a link."
+_LOGIN_VERIFY_LINK_NOT_SENT = (
+    "Please verify your email before logging in. We could not send the link just now: "
+    "use Forgot password to get one."
+)
+
+
+async def _send_verification_link(email: str) -> bool:
+    """Email a fresh verification link. False (and logged) if it could not be sent.
+
+    Never raises: the account it is for already exists, and a 500 here left the
+    person with an account they could not verify and a sign-up that now
+    answers 409 (hivemind #502).
+    """
+    from core.auth.email_token_store import create_email_token
+    from core.auth.email_service import send_verification_email
+
+    try:
+        token = await create_email_token(email, "verify")
+        await send_verification_email(email, token)
+        return True
+    except Exception:
+        logger.exception("[verify] could not send the verification email to %s", email)
+        return False
+
+
 # ── Endpoints ──────────────────────────────────────────────────────
 
 @router.get("/config", response_model=AuthConfigResponse)
@@ -358,6 +397,15 @@ async def register(body: RegisterRequest, request: Request) -> MessageResponse:
     if not waitlist_approved and not is_whitelisted:
         await _check_invite(email)
 
+    # An email whose row is already linked to a sign-in user has an account.
+    # Answer before sign_up(), so this request can neither make a second
+    # sign-in user for that address nor move the account's link to one
+    # (link_supertokens_id below would). A row the allow-list step pre-made,
+    # linked to nobody yet, can still register. (hivemind #502)
+    existing = await get_user_by_email(email)
+    if existing is not None and existing.supertokens_user_id:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+
     result = await sign_up("public", email, body.password)
     if isinstance(result, EmailAlreadyExistsError):
         raise HTTPException(status_code=409, detail="An account with this email already exists")
@@ -371,19 +419,16 @@ async def register(body: RegisterRequest, request: Request) -> MessageResponse:
     # it says nothing about who sent this request, which carries only an email
     # and a password. Marking the address verified here let anyone who knew a
     # pre-approved address claim it, with its role -- admin included.
-    # Clear the flag rather than just not setting it: the row can arrive here
-    # already marked verified (provision_allowed_emails used to pre-verify every
-    # ALLOWED_EMAILS address; a Google sign-in verifies it too), and the password
-    # made by THIS request has proven nothing. The mailbox owner gets it back by
-    # clicking the link sent below.
+    # Clear the flag rather than just not setting it: a pre-made row linked to
+    # nobody can arrive here already marked verified (provision_allowed_emails
+    # used to pre-verify every ALLOWED_EMAILS address), and the password made by
+    # THIS request has proven nothing. The mailbox owner gets it back by clicking
+    # the link sent below.
     await set_email_verified(email, verified=False)
 
-    from core.auth.email_token_store import create_email_token
-    from core.auth.email_service import send_verification_email
-    token = await create_email_token(email, "verify")
-    await send_verification_email(email, token)
-
-    return MessageResponse(message="Account created — check your email to verify.")
+    if await _send_verification_link(email):
+        return MessageResponse(message=_VERIFY_EMAIL_SENT)
+    return MessageResponse(message=_VERIFY_EMAIL_NOT_SENT)
 
 
 @router.post("/password-login", response_model=LoginResponse)
@@ -399,33 +444,49 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     st_user_id = result.user.id
-
-    # Check email verification. Nobody bypasses it: being on ALLOWED_EMAILS
-    # never proved the mailbox, and verifying whitelisted addresses here undid
-    # the check on /register (hivemind #502). A row still marked "pending" was
-    # made by provision_allowed_emails and has never been through /register, so
-    # its verified flag was never earned either: this password was created
-    # somewhere else (SuperTokens' own /api/auth/st/signup checks nothing).
     record = await get_user_by_email(email)
-    # One email can belong to several SuperTokens users here (account linking is
-    # off), and the row is found by email. Only the SuperTokens user the row is
-    # linked to may sign in to it; otherwise a second password user for the same
-    # address -- made by SuperTokens' own /api/auth/st/signup, or by /register on
-    # a Google-only account -- took the row over, verified flag and all
-    # (hivemind #502). A row not linked to anyone yet keeps the old behaviour:
-    # this login links it.
-    if record and record.supertokens_user_id and record.supertokens_user_id != st_user_id:
+
+    # 1. One email can belong to several SuperTokens users here (account linking
+    #    is off), and the row is found by email. Only the sign-in user the row is
+    #    linked to may use it; before, a second password user for the address
+    #    (SuperTokens' own /api/auth/st/signup made them for anyone) took the row
+    #    over, verified flag and all (hivemind #502).
+    if record is not None and record.supertokens_user_id and record.supertokens_user_id != st_user_id:
         raise HTTPException(
             status_code=403,
             detail="This account signs in another way. Use the button you used before (for example Google).",
         )
-    if record and (not record.email_verified or record.auth_provider == "pending"):
-        raise HTTPException(status_code=403, detail="Please verify your email before logging in")
 
-    # Ensure app profile exists and is linked
-    if record is None:
-        record = await upsert_user(email=email, auth_provider="password")
-    await link_supertokens_id(email, st_user_id)
+    # 2. No account linked to this email yet -- no row at all, or a row linked to
+    #    nobody whose verified flag was never earned ("pending": pre-made by the
+    #    allow-list step; or simply unverified). Before, this login made or took
+    #    the row and handed out a session with no invite check and no proof of
+    #    the mailbox. Now it does what /register does: invite check, link the
+    #    row to this sign-in user, and send the verification link.
+    unearned = record is not None and (record.auth_provider == "pending" or not record.email_verified)
+    if record is None or (record.supertokens_user_id is None and unearned):
+        await _check_invite(email)
+        if record is None:
+            await upsert_user(email=email, auth_provider="password")
+        await link_supertokens_id(email, st_user_id)
+        await set_email_verified(email, verified=False)
+        sent = await _send_verification_link(email)
+        raise HTTPException(
+            status_code=403,
+            detail=_LOGIN_VERIFY_LINK_SENT if sent else _LOGIN_VERIFY_LINK_NOT_SENT,
+        )
+
+    # 3. Linked to this sign-in user: the mailbox must have been proven. Being on
+    #    ALLOWED_EMAILS is not proof (it used to verify the address right here).
+    if not record.email_verified:
+        raise HTTPException(status_code=403, detail=_LOGIN_VERIFY_FIRST)
+
+    # 4. Linked to this sign-in user and verified: sign in, whatever the label
+    #    says. Production's admins signed in by password for months on rows still
+    #    labelled "pending"; the label now says how they actually sign in.
+    if record.auth_provider != "password":
+        await set_auth_provider(email, "password")
+    await link_supertokens_id(email, st_user_id)  # no-op when already linked
 
     role = "admin" if _is_admin_email(email) else record.role
     user = CurrentUser(
