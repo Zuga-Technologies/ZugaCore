@@ -366,12 +366,18 @@ async def register(body: RegisterRequest, request: Request) -> MessageResponse:
     await upsert_user(email=email, auth_provider="password")
     await link_supertokens_id(email, st_user_id)
 
-    if waitlist_approved or is_whitelisted:
-        # Pre-approved users skip email verification
-        await set_email_verified(email)
-        return MessageResponse(message="Account created — you're all set!")
+    # Everyone proves the mailbox, pre-approved or not (hivemind #502).
+    # Being on ALLOWED_EMAILS or an approved waitlist decides who MAY sign up;
+    # it says nothing about who sent this request, which carries only an email
+    # and a password. Marking the address verified here let anyone who knew a
+    # pre-approved address claim it, with its role -- admin included.
+    # Clear the flag rather than just not setting it: the row can arrive here
+    # already marked verified (provision_allowed_emails used to pre-verify every
+    # ALLOWED_EMAILS address; a Google sign-in verifies it too), and the password
+    # made by THIS request has proven nothing. The mailbox owner gets it back by
+    # clicking the link sent below.
+    await set_email_verified(email, verified=False)
 
-    # Standard flow: send verification email
     from core.auth.email_token_store import create_email_token
     from core.auth.email_service import send_verification_email
     token = await create_email_token(email, "verify")
@@ -394,15 +400,15 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
 
     st_user_id = result.user.id
 
-    # Check email verification (whitelisted users bypass)
+    # Check email verification. Nobody bypasses it: being on ALLOWED_EMAILS
+    # never proved the mailbox, and verifying whitelisted addresses here undid
+    # the check on /register (hivemind #502). A row still marked "pending" was
+    # made by provision_allowed_emails and has never been through /register, so
+    # its verified flag was never earned either: this password was created
+    # somewhere else (SuperTokens' own /api/auth/st/signup checks nothing).
     record = await get_user_by_email(email)
-    allowed_emails = _get_allowed_emails()
-    is_whitelisted = allowed_emails is not None and email in allowed_emails
-    if record and not record.email_verified:
-        if is_whitelisted:
-            await set_email_verified(email)
-        else:
-            raise HTTPException(status_code=403, detail="Please verify your email before logging in")
+    if record and (not record.email_verified or record.auth_provider == "pending"):
+        raise HTTPException(status_code=403, detail="Please verify your email before logging in")
 
     # Ensure app profile exists and is linked
     if record is None:
