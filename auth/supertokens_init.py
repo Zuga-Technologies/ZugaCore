@@ -127,6 +127,33 @@ def _build_providers() -> List[ProviderInput]:
     return providers
 
 
+# The override config class is EmailPasswordOverrideConfig in current
+# supertokens-python; older releases (production allows >=0.25.0) call it
+# InputOverrideConfig, which current releases keep as a deprecated alias.
+_EmailPasswordOverrideConfig = (
+    getattr(emailpassword, "EmailPasswordOverrideConfig", None)
+    or emailpassword.InputOverrideConfig
+)
+
+
+def _close_builtin_password_routes(original_implementation):
+    """Switch off SuperTokens' own HTTP sign-up and sign-in (hivemind #502).
+
+    A password account is made only by our POST /api/auth/register (invite
+    check, verification email) and signed in only by POST
+    /api/auth/password-login (verified-email check). The built-in
+    /api/auth/st/signup and /api/auth/st/signin skip both: signup made a
+    password user for any email, with no invite, and signin handed a session to
+    any password user, verified or not. Nothing of ours calls them.
+
+    Only these two HTTP routes go: the in-process sign_up()/sign_in() our
+    routes call are untouched, and so are session refresh and sign-out.
+    """
+    original_implementation.disable_sign_up_post = True
+    original_implementation.disable_sign_in_post = True
+    return original_implementation
+
+
 def _get_token_transfer_method(
     request: Any, for_create_new_session: bool, user_context: Dict[str, Any]
 ) -> str:
@@ -154,7 +181,9 @@ def init_supertokens() -> None:
     )
 
     recipe_list = [
-        emailpassword.init(),
+        emailpassword.init(
+            override=_EmailPasswordOverrideConfig(apis=_close_builtin_password_routes),
+        ),
         session.init(
             get_token_transfer_method=_get_token_transfer_method,
             anti_csrf="NONE",  # Not needed with header-based auth

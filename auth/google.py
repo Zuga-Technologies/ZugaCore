@@ -35,6 +35,13 @@ def verify_google_token(credential: str, client_id: str) -> dict:
         if id_info.get("iss") not in ("accounts.google.com", "https://accounts.google.com"):
             raise ValueError("Invalid issuer")
 
+        # Google also signs tokens for accounts whose address it never confirmed,
+        # and says so in the email_verified claim. The caller marks every Google
+        # sign-in verified, so an unconfirmed address must stop here, with the
+        # same 401 as any other credential we cannot accept (hivemind #502).
+        if id_info.get("email_verified") not in (True, "true"):
+            raise HTTPException(status_code=401, detail="Google has not verified this email address")
+
         return {
             "email": id_info["email"],
             "name": id_info.get("name"),
