@@ -407,6 +407,18 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
     # its verified flag was never earned either: this password was created
     # somewhere else (SuperTokens' own /api/auth/st/signup checks nothing).
     record = await get_user_by_email(email)
+    # One email can belong to several SuperTokens users here (account linking is
+    # off), and the row is found by email. Only the SuperTokens user the row is
+    # linked to may sign in to it; otherwise a second password user for the same
+    # address -- made by SuperTokens' own /api/auth/st/signup, or by /register on
+    # a Google-only account -- took the row over, verified flag and all
+    # (hivemind #502). A row not linked to anyone yet keeps the old behaviour:
+    # this login links it.
+    if record and record.supertokens_user_id and record.supertokens_user_id != st_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="This account signs in another way. Use the button you used before (for example Google).",
+        )
     if record and (not record.email_verified or record.auth_provider == "pending"):
         raise HTTPException(status_code=403, detail="Please verify your email before logging in")
 
