@@ -84,7 +84,7 @@ from core.plugins.interface import StudioPlugin
 
 ### StudioPlugin (embedded)
 
-Runs inside ZugaApp, shares its database and auth. The studio provides a FastAPI router that gets mounted into the host app.
+Runs inside ZugaPlatform, shares its database and auth. The studio provides a FastAPI router that gets mounted into the host app.
 
 ```python
 class MyStudioPlugin(StudioPlugin):
@@ -98,7 +98,7 @@ class MyStudioPlugin(StudioPlugin):
 
 ### ProxyPlugin (standalone)
 
-For studios that run their own backend 24/7. ZugaApp forwards requests to the standalone service.
+For studios that run their own backend 24/7. ZugaPlatform forwards requests to the standalone service.
 
 ```python
 class MyTraderPlugin(ProxyPlugin):
@@ -124,8 +124,8 @@ Three operating modes based on environment:
 
 | Scenario | Client Used | How |
 |----------|-------------|-----|
-| Inside ZugaApp | `DirectCreditClient` | Shares ZugaApp's database |
-| Standalone + `ZUGAAPP_CREDITS_URL` set | `HttpCreditClient` | Calls ZugaApp's credit API |
+| Inside ZugaPlatform | `DirectCreditClient` | Shares ZugaPlatform's database |
+| Standalone + `ZUGAAPP_CREDITS_URL` set | `HttpCreditClient` | Calls ZugaPlatform's credit API |
 | Standalone + no URL | `DirectCreditClient` | Uses own SQLite with 50 free daily tokens |
 
 `CREDIT_FAIL_MODE=open` (default) allows spending when the credit server is unreachable.
