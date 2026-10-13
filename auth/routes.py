@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 
@@ -49,6 +50,7 @@ from supertokens_python.recipe.thirdparty.interfaces import (
     ManuallyCreateOrUpdateUserOkResult,
 )
 from supertokens_python.types import RecipeUserId
+from supertokens_python.exceptions import SuperTokensError
 
 from core.auth.config import (
     get_auth_mode,
@@ -800,6 +802,34 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
     return LoginResponse(token=token, refresh_token=refresh_token, user=await _user_dict_with_apps(user))
 
 
+_REFRESH_RETRY_AFTER_S = 5
+# supertokens_python/querier.py reports the core's own HTTP errors as a plain
+# Exception: "SuperTokens core threw an error ... with status code: 500 ...".
+_CORE_STATUS = re.compile(r"with status code: (\d{3})")
+
+
+def _refresh_failure_is_outage(exc: Exception) -> bool:
+    """True when a refresh failed because the auth core is DOWN, not because
+    the token is bad (hivemind #423).
+
+    Bad token: the SDK raises its own errors (UnauthorisedError for an expired
+    or unknown token, TokenTheftError for a reused one), or the core answers
+    4xx because the request itself was wrong. Retrying would never help: 401.
+
+    Outage: the SDK raises a plain Exception ("No SuperTokens core available
+    to query" once every host refused the connection, or the core's 5xx or a
+    429 it kept sending past the SDK's own retries), or the HTTP client's own
+    timeout escapes. The token may be perfectly good: 503, try again.
+    """
+    if isinstance(exc, SuperTokensError):
+        return False
+    m = _CORE_STATUS.search(str(exc))
+    if m is not None:
+        status = int(m.group(1))
+        return status >= 500 or status == 429
+    return True
+
+
 @router.post("/session/refresh", response_model=RefreshResponse)
 async def refresh_session_endpoint(body: RefreshRequest, request: Request) -> RefreshResponse:
     """Rotate a SuperTokens session using a desktop-held refresh token.
@@ -811,6 +841,8 @@ async def refresh_session_endpoint(body: RefreshRequest, request: Request) -> Re
     Refresh tokens ROTATE on every successful call: the returned
     refresh_token REPLACES the one sent. Clients must persist the new pair.
     On 401, the client should clear stored tokens and prompt re-login.
+    On 503, the auth core is down: keep the tokens and try again later
+    (hivemind #423 -- one core blip used to sign every client out).
     """
     client_ip = request.client.host if request.client else "unknown"
     _check_rate_limit(f"refresh:{client_ip}", max_requests=30, window_seconds=60)
@@ -821,11 +853,19 @@ async def refresh_session_endpoint(body: RefreshRequest, request: Request) -> Re
             disable_anti_csrf=True,
         )
     except Exception as exc:
-        # UnauthorisedError, TokenTheftError, or transport error — treat all
-        # as "please log in again." We never surface SuperTokens internals to
-        # the client, and we don't rotate on failure.
-        # Log class + repr at WARNING so the next phone-bounce shows up in
-        # Railway logs and we can tell theft from expiry from transport.
+        # We never surface SuperTokens internals to the client, and we don't
+        # rotate on failure. Log class + repr at WARNING so Railway logs tell
+        # theft from expiry from an outage.
+        if _refresh_failure_is_outage(exc):
+            logger.warning(
+                "[refresh-503] ip=%s exc_class=%s repr=%r",
+                client_ip, exc.__class__.__name__, exc,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="auth temporarily unavailable, try again",
+                headers={"Retry-After": str(_REFRESH_RETRY_AFTER_S)},
+            )
         logger.warning(
             "[refresh-401] ip=%s exc_class=%s repr=%r",
             client_ip, exc.__class__.__name__, exc,
