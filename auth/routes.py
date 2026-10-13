@@ -243,8 +243,19 @@ async def _user_dict_with_apps(user: CurrentUser) -> dict:
     return d
 
 
+def _mask_email(email: str) -> str:
+    """'approved.person@example.com' -> 'ap***@example.com', for logs."""
+    local, at, domain = email.partition("@")
+    return f"{local[:2]}***{at}{domain}"
+
+
 async def _is_waitlist_approved(email: str) -> bool:
-    """Check if email was approved via the waitlist system."""
+    """Check if email was approved via the waitlist system.
+
+    An error answers False (an error must never let anyone in), but it is
+    logged: it used to be swallowed silently, which hid why an approved
+    address went down the not-approved path on 2026-10-08 (hivemind #531).
+    """
     try:
         from core.database.session import get_session
         from sqlalchemy import text
@@ -255,7 +266,17 @@ async def _is_waitlist_approved(email: str) -> bool:
             )
             result = row.fetchone()
             return result is not None and result[0] == "approved"
-    except Exception:
+    except Exception as exc:
+        # A SQLAlchemy error's text carries the bound parameters (the email),
+        # so log the driver's own error (`orig`) and mask any address left.
+        masked = _mask_email(email)
+        reason = str(getattr(exc, "orig", None) or exc)
+        if email:
+            reason = reason.replace(email, masked)
+        logger.warning(
+            "[waitlist-lookup] failed for %s, treating as not approved: %s: %s",
+            masked, exc.__class__.__name__, reason,
+        )
         return False
 
 
