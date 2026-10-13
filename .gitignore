@@ -3,3 +3,7 @@ __pycache__/
 node_modules/
 dist/
 .env
+
+# Lane worktrees and per-worktree venvs (never committed)
+.claude/worktrees/
+.venv/

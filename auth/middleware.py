@@ -2,9 +2,24 @@ import logging
 
 from fastapi import Depends, HTTPException, Request
 
-from core.auth.models import CurrentUser
+from core.auth.models import CurrentUser, email_verified_for, identity_source_for
 
 logger = logging.getLogger(__name__)
+
+
+def _local_mode_user() -> CurrentUser | None:
+    """LOCAL_MODE's auto-signed-in desktop user, or None when it is off.
+
+    core.local_mode is provided by the consumer (ZugaPlatform's desktop build);
+    a consumer without that module simply has no local mode, so tokens are
+    validated as usual. Before this guard such a consumer answered every
+    authenticated request with a 500 (ModuleNotFoundError).
+    """
+    try:
+        from core.local_mode import LOCAL_MODE, local_user
+    except ImportError:
+        return None
+    return local_user() if LOCAL_MODE else None
 
 
 async def get_current_user(request: Request) -> CurrentUser:
@@ -12,10 +27,16 @@ async def get_current_user(request: Request) -> CurrentUser:
 
     This is used as a FastAPI dependency. Any route that needs
     authentication adds: user: CurrentUser = Depends(get_current_user)
+
+    Enterprise note: the per-org MFA requirement (settings.mfa_required) is
+    NOT applied here. It is applied where an org is actually addressed, in
+    core.auth.orgs.service._require_membership, so one org's setting can
+    only ever gate that org's own routes. A consumer that serves org-scoped
+    resources of its own calls core.auth.mfa.service.gate_for_org.
     """
-    from core.local_mode import LOCAL_MODE, local_user
-    if LOCAL_MODE:
-        return local_user()
+    local = _local_mode_user()
+    if local is not None:
+        return local
 
     auth_header = request.headers.get("Authorization")
 
@@ -47,9 +68,9 @@ async def get_current_user_optional(request: Request) -> CurrentUser | None:
     Never grants elevated privilege on None — the caller is responsible for
     failing safe (treat None as the lowest privilege level).
     """
-    from core.local_mode import LOCAL_MODE, local_user
-    if LOCAL_MODE:
-        return local_user()
+    local = _local_mode_user()
+    if local is not None:
+        return local
 
     auth_header = request.headers.get("Authorization")
 
@@ -118,12 +139,20 @@ async def _validate_token(token: str) -> CurrentUser | None:
         # proven they own it, and SuperTokens' built-in sign-in skips the app's
         # verify-your-email check.
         role = record.role if record.email_verified else "user"
+        # The session handle is what the enterprise MFA gate keys on. Optional:
+        # a session object without one (older SuperTokens, test doubles) just
+        # yields a user that cannot be MFA-verified, never a failed login.
+        get_handle = getattr(session, "get_handle", None)
+        session_id = get_handle() if callable(get_handle) else None
         return CurrentUser(
             id=record.id,
             email=record.email,
             role=role,
             name=record.name,
             avatar_url=record.avatar_url,
+            session_id=session_id,
+            email_verified=email_verified_for(record.email_verified, record.identity_source),
+            identity_source=identity_source_for(record.auth_provider, record.identity_source),
         )
 
     except Exception as e:
