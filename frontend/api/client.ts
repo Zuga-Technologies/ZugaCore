@@ -87,6 +87,11 @@ export const SIGN_IN_UNAVAILABLE = 'Sign-in is briefly unavailable. Try again in
 // Waits between refresh attempts while sign-in is unavailable: covers a
 // restart of a few seconds without holding a page's requests for long.
 const REFRESH_RETRY_DELAYS_MS = [1000, 3000]
+// After a refresh chain ends unavailable, the next 401 must not start another
+// one at once: callers that retry would keep three POSTs per 401 coming. The
+// server's 503 says Retry-After: 5.
+const REFRESH_COOLDOWN_MS = 5000
+let refreshUnavailableUntil = 0
 
 /**
  * Attempt to mint a new access token using the stored refresh token.
@@ -103,6 +108,10 @@ export async function tryRefresh(): Promise<string | null> {
   const refreshToken = getRefreshToken()
   if (!refreshToken) {
     lastRefreshUnavailable = false
+    return null
+  }
+  if (Date.now() < refreshUnavailableUntil) {
+    lastRefreshUnavailable = true
     return null
   }
 
@@ -132,10 +141,18 @@ export async function tryRefresh(): Promise<string | null> {
         // 401 = the token is dead; anything else that isn't ok is an outage.
         if (res && (res.ok || res.status === 401)) break
         await new Promise(resolve => setTimeout(resolve, delay))
+        // Another tab (same storage) may have refreshed while we waited. Its
+        // new pair retired our token: resending it would read as token theft
+        // and sign every tab out. Use the pair it stored instead.
+        if (getRefreshToken() !== refreshToken) {
+          lastRefreshUnavailable = false
+          return getToken()
+        }
         res = await attempt()
       }
       if (!res || !res.ok) {
         lastRefreshUnavailable = !res || res.status !== 401
+        if (lastRefreshUnavailable) refreshUnavailableUntil = Date.now() + REFRESH_COOLDOWN_MS
         return null
       }
       const body = await res.json() as { token: string; refresh_token: string }
@@ -145,6 +162,7 @@ export async function tryRefresh(): Promise<string | null> {
     } catch {
       // A 200 whose body would not parse: not a dead token either.
       lastRefreshUnavailable = true
+      refreshUnavailableUntil = Date.now() + REFRESH_COOLDOWN_MS
       return null
     } finally {
       // Clear the in-flight gate on the next tick so any 401 retries that
