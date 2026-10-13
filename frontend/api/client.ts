@@ -68,10 +68,37 @@ export function redirectToLogin(reason: 'expired' | 'required' = 'expired'): voi
 // out, with everyone awaiting the same result.
 let inFlightRefresh: Promise<string | null> | null = null
 
+// Whether the last refresh failed because sign-in was UNAVAILABLE (the server
+// answered 503 "auth temporarily unavailable", a 5xx/429, or never answered)
+// rather than because the refresh token is dead (401). Only a dead token is a
+// sign-out; an outage keeps the session so the next call can try again
+// (hivemind #423: one auth-core blip used to sign everyone out).
+let lastRefreshUnavailable = false
+
+/** True when the last tryRefresh() returned null because sign-in was briefly
+ *  unavailable, not because the session is dead. Callers must NOT clear the
+ *  session or send the user to login in that case. */
+export function refreshWasUnavailable(): boolean {
+  return lastRefreshUnavailable
+}
+
+export const SIGN_IN_UNAVAILABLE = 'Sign-in is briefly unavailable. Try again in a moment.'
+
+// Waits between refresh attempts while sign-in is unavailable: covers a
+// restart of a few seconds without holding a page's requests for long.
+const REFRESH_RETRY_DELAYS_MS = [1000, 3000]
+// After a refresh chain ends unavailable, the next 401 must not start another
+// one at once: callers that retry would keep three POSTs per 401 coming. The
+// server's 503 says Retry-After: 5.
+const REFRESH_COOLDOWN_MS = 5000
+let refreshUnavailableUntil = 0
+
 /**
  * Attempt to mint a new access token using the stored refresh token.
  * Returns the new access token on success (already persisted), or null on
- * failure (refresh token missing, expired, or rotated by another tab).
+ * failure: the refresh token is missing, expired, or rotated by another tab
+ * (refreshWasUnavailable() false), or sign-in stayed unavailable through the
+ * retries (refreshWasUnavailable() true, session kept).
  *
  * Concurrent callers share one refresh request — important when a page
  * fires a dozen API calls on mount and they all 401 in parallel.
@@ -79,7 +106,14 @@ let inFlightRefresh: Promise<string | null> | null = null
 export async function tryRefresh(): Promise<string | null> {
   if (inFlightRefresh) return inFlightRefresh
   const refreshToken = getRefreshToken()
-  if (!refreshToken) return null
+  if (!refreshToken) {
+    lastRefreshUnavailable = false
+    return null
+  }
+  if (Date.now() < refreshUnavailableUntil) {
+    lastRefreshUnavailable = true
+    return null
+  }
 
   inFlightRefresh = (async () => {
     const doFetch = () => fetch('/api/auth/session/refresh', {
@@ -87,20 +121,48 @@ export async function tryRefresh(): Promise<string | null> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: refreshToken }),
     })
-    try {
-      let res: Response
+    // One attempt: the response, or null when the request never got one.
+    const attempt = async (): Promise<Response | null> => {
       try {
-        res = await doFetch()
+        return await doFetch()
       } catch (err) {
-        if (!(err instanceof TypeError)) throw err
+        if (!(err instanceof TypeError)) return null
         await waitForVisible()
-        res = await doFetch()
+        try {
+          return await doFetch()
+        } catch {
+          return null
+        }
       }
-      if (!res.ok) return null
+    }
+    try {
+      let res = await attempt()
+      for (const delay of REFRESH_RETRY_DELAYS_MS) {
+        // 401 = the token is dead; anything else that isn't ok is an outage.
+        if (res && (res.ok || res.status === 401)) break
+        await new Promise(resolve => setTimeout(resolve, delay))
+        // Another tab (same storage) may have refreshed while we waited. Its
+        // new pair retired our token: resending it would read as token theft
+        // and sign every tab out. Use the pair it stored instead.
+        if (getRefreshToken() !== refreshToken) {
+          lastRefreshUnavailable = false
+          return getToken()
+        }
+        res = await attempt()
+      }
+      if (!res || !res.ok) {
+        lastRefreshUnavailable = !res || res.status !== 401
+        if (lastRefreshUnavailable) refreshUnavailableUntil = Date.now() + REFRESH_COOLDOWN_MS
+        return null
+      }
       const body = await res.json() as { token: string; refresh_token: string }
       setSession(body.token, body.refresh_token)
+      lastRefreshUnavailable = false
       return body.token
     } catch {
+      // A 200 whose body would not parse: not a dead token either.
+      lastRefreshUnavailable = true
+      refreshUnavailableUntil = Date.now() + REFRESH_COOLDOWN_MS
       return null
     } finally {
       // Clear the in-flight gate on the next tick so any 401 retries that
@@ -215,6 +277,10 @@ async function request<T>(method: string, path: string, body?: unknown, timeoutM
         // Retry once with fresh token.
         token = newToken
         res = await fetchWithResumeRetry(method, path, body, token, timeoutMs)
+      } else if (refreshWasUnavailable()) {
+        // Sign-in is down, not the session: keep it and fail just this call
+        // so the next one tries again (hivemind #423).
+        throw new ApiError(503, { detail: SIGN_IN_UNAVAILABLE })
       }
     }
     // Still 401 (refresh failed, or no token to begin with)? Session is dead —

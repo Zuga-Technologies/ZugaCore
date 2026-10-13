@@ -252,9 +252,14 @@ export const useAuthStore = defineStore('auth', () => {
     loading.value = true
     try {
       user.value = await api.get<User>('/api/auth/me')
-    } catch {
-      clearSession()
-      user.value = null
+    } catch (e) {
+      // Only a 401 means signed out. A network error, a deploy's 502, or
+      // sign-in being briefly down (503) used to clear the session too, so a
+      // tab regaining focus at the wrong second signed the user out (#423).
+      if (e instanceof ApiError && e.status === 401) {
+        clearSession()
+        user.value = null
+      }
     } finally {
       loading.value = false
     }
