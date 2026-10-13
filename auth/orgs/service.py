@@ -101,10 +101,15 @@ async def _get_org_by_slug(session: AsyncSession, slug: str) -> Org | None:
     return await session.scalar(select(Org).where(Org.slug == slug))
 
 
-async def _get_membership(session: AsyncSession, org_id: str, user_id: str) -> OrgMember | None:
-    return await session.scalar(
-        select(OrgMember).where(OrgMember.org_id == org_id, OrgMember.user_id == user_id)
-    )
+async def _get_membership(
+    session: AsyncSession, org_id: str, user_id: str, *, include_inactive: bool = False
+) -> OrgMember | None:
+    """The membership row, or None. A SCIM-deactivated member is None unless
+    `include_inactive` is set (only the surfaces that manage the row set it)."""
+    query = select(OrgMember).where(OrgMember.org_id == org_id, OrgMember.user_id == user_id)
+    if not include_inactive:
+        query = query.where(OrgMember.active.is_(True))
+    return await session.scalar(query)
 
 
 async def _require_membership(
@@ -126,7 +131,7 @@ async def _require_membership(
 async def _count_owners(session: AsyncSession, org_id: str) -> int:
     return await session.scalar(
         select(func.count()).select_from(OrgMember).where(
-            OrgMember.org_id == org_id, OrgMember.role == "owner"
+            OrgMember.org_id == org_id, OrgMember.role == "owner", OrgMember.active.is_(True)
         )
     ) or 0
 
@@ -143,9 +148,9 @@ async def _add_membership(session: AsyncSession, org_id: str, user_id: str, role
     """Insert a membership row; 409 if the user is already a member."""
     if role not in ORG_ROLES:
         raise OrgError(status_code=422, detail=f"role must be one of {', '.join(ORG_ROLES)}")
-    if await _get_membership(session, org_id, user_id) is not None:
+    if await _get_membership(session, org_id, user_id, include_inactive=True) is not None:
         raise OrgError(status_code=409, detail="Already a member of this organisation")
-    membership = OrgMember(org_id=org_id, user_id=user_id, role=role)
+    membership = OrgMember(org_id=org_id, user_id=user_id, role=role, active=True)
     session.add(membership)
     await session.flush()
     return membership
@@ -252,7 +257,7 @@ async def list_orgs_for_user(user_id: str) -> list[tuple[Org, str]]:
         rows = await session.execute(
             select(Org, OrgMember.role)
             .join(OrgMember, OrgMember.org_id == Org.id)
-            .where(OrgMember.user_id == user_id)
+            .where(OrgMember.user_id == user_id, OrgMember.active.is_(True))
             .order_by(Org.name, Org.slug)
         )
         return [(org, role) for org, role in rows.all()]
@@ -343,7 +348,7 @@ async def set_member_role(org_id: str, actor_user_id: str, user_id: str, role: s
         raise OrgError(status_code=422, detail=f"role must be one of {', '.join(ORG_ROLES)}")
     async with get_session() as session:
         _, actor = await _require_membership(session, org_id, actor_user_id, MANAGER_ROLES)
-        target = await _get_membership(session, org_id, user_id)
+        target = await _get_membership(session, org_id, user_id, include_inactive=True)
         if target is None:
             raise OrgError(status_code=404, detail="That user is not a member of this organisation")
         if not _can_touch(actor.role, target.role) or not _can_assign(actor.role, role):
@@ -358,7 +363,7 @@ async def set_member_role(org_id: str, actor_user_id: str, user_id: str, role: s
 async def remove_member(org_id: str, actor_user_id: str, user_id: str) -> None:
     async with get_session() as session:
         _, actor = await _require_membership(session, org_id, actor_user_id)
-        target = await _get_membership(session, org_id, user_id)
+        target = await _get_membership(session, org_id, user_id, include_inactive=True)
         if target is None:
             raise OrgError(status_code=404, detail="That user is not a member of this organisation")
         leaving = actor.user_id == user_id

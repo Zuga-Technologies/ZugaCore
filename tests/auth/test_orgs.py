@@ -106,7 +106,7 @@ def test_creator_becomes_owner(ent):
     assert [(o["slug"], o["role"]) for o in listed] == [("acme", "owner")]
 
     members = ent.get(f"/api/orgs/{org['id']}/members", headers=_as("u1")).json()
-    assert members == [{"user_id": "u1", "email": "u1@example.com", "name": None, "role": "owner"}]
+    assert members == [{"user_id": "u1", "email": "u1@example.com", "name": None, "role": "owner", "active": True}]
 
 
 def test_slug_is_unique_across_the_platform(ent):
@@ -147,7 +147,7 @@ def test_owner_can_add_members(ent):
     oid = _create_org(ent)["id"]
     r = ent.post(f"/api/orgs/{oid}/members", json={"user_id": "u2"}, headers=_as("u1"))
     assert r.status_code == 201, r.text
-    assert r.json() == {"user_id": "u2", "email": "u2@example.com", "name": None, "role": "member"}
+    assert r.json() == {"user_id": "u2", "email": "u2@example.com", "name": None, "role": "member", "active": True}
 
     roles = {m["user_id"]: m["role"] for m in ent.get(f"/api/orgs/{oid}/members", headers=_as("u1")).json()}
     assert roles == {"u1": "owner", "u2": "member"}

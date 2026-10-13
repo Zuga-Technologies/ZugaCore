@@ -37,7 +37,11 @@ def include_enterprise_routes(app: FastAPI) -> None:
     from core.auth.mfa.router import router as mfa_router
     from core.auth.orgs.router import router as orgs_router
     from core.auth.saml.router import router as saml_router
+    from core.auth.scim.router import scim_app, token_router
 
     app.include_router(orgs_router)
     app.include_router(mfa_router)
     app.include_router(saml_router)
+    app.include_router(token_router)
+    # a sub-application, so its errors keep the RFC 7644 shape (see core.auth.scim.router)
+    app.mount("/scim/v2", scim_app)

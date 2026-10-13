@@ -21,7 +21,7 @@ PRAGMA foreign_keys on for every connection).
 
 import uuid
 
-from sqlalchemy import JSON, Enum, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Enum, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database.base import Base, TimestampMixin
@@ -52,7 +52,10 @@ class OrgMember(Base, TimestampMixin):
     """One user's membership of one org, with their role in it."""
 
     __tablename__ = "org_member"
-    __table_args__ = (UniqueConstraint("org_id", "user_id", name="uq_org_member"),)
+    __table_args__ = (
+        UniqueConstraint("org_id", "user_id", name="uq_org_member"),
+        UniqueConstraint("org_id", "external_id", name="uq_org_member_external_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[str] = mapped_column(
@@ -74,6 +77,13 @@ class OrgMember(Base, TimestampMixin):
     # {"display_name", "groups", "roles"} (Task E3). Officium maps "roles"
     # to sys_user_role. Never changes `role` above: an IdP cannot make owners.
     sso_attributes: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
+    # SCIM (Task E4): a deactivated member keeps the row (the IdP may
+    # reactivate) but is not a member for any permission check; external_id
+    # is the IdP's id for the person; `scim` holds its view of the account
+    # (userName, name parts, displayName) so it round-trips exactly.
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    scim: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
 
 
 class OrgGroup(Base, TimestampMixin):

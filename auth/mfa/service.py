@@ -256,7 +256,9 @@ async def regenerate_recovery_codes(user: CurrentUser, code: str) -> list[str]:
 async def _required_for(session, user_id: str) -> bool:
     """Is the user a member of any org whose settings.mfa_required is true?"""
     rows = await session.execute(
-        select(Org.settings).join(OrgMember, OrgMember.org_id == Org.id).where(OrgMember.user_id == user_id)
+        select(Org.settings)
+        .join(OrgMember, OrgMember.org_id == Org.id)
+        .where(OrgMember.user_id == user_id, OrgMember.active.is_(True))
     )
     return any(bool((settings or {}).get("mfa_required")) for (settings,) in rows.all())
 

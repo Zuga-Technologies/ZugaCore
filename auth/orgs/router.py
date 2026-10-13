@@ -85,6 +85,7 @@ class MemberOut(BaseModel):
     email: str
     name: str | None
     role: OrgRole
+    active: bool = True
 
 
 class GroupCreate(BaseModel):
@@ -116,7 +117,9 @@ def _org_out(org: Org, role: str) -> OrgOut:
 
 
 def _member_out(membership: OrgMember, user: UserRecord) -> MemberOut:
-    return MemberOut(user_id=user.id, email=user.email, name=user.name, role=membership.role)
+    return MemberOut(
+        user_id=user.id, email=user.email, name=user.name, role=membership.role, active=bool(membership.active)
+    )
 
 
 def _group_out(group: OrgGroup, member_count: int) -> GroupOut:

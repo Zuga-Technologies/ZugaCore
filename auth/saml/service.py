@@ -302,7 +302,9 @@ async def consume(org_slug: str, post_data: dict[str, Any], ip: str | None = Non
                 await session.flush()
             elif display_name and user.name != display_name:
                 user.name = display_name
-            membership = await orgs._get_membership(session, org.id, user.id)
+            membership = await orgs._get_membership(session, org.id, user.id, include_inactive=True)
+            if membership is not None and not membership.active:
+                raise SamlError(status_code=403, detail="Your account in this organisation has been deactivated")
             if membership is None:
                 if not created:
                     raise SamlError(status_code=403, detail="You are no longer a member of this organisation")
