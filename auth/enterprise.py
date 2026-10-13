@@ -36,6 +36,8 @@ def include_enterprise_routes(app: FastAPI) -> None:
     """
     from core.auth.mfa.router import router as mfa_router
     from core.auth.orgs.router import router as orgs_router
+    from core.auth.saml.router import router as saml_router
 
     app.include_router(orgs_router)
     app.include_router(mfa_router)
+    app.include_router(saml_router)

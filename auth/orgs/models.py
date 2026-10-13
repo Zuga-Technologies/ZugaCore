@@ -70,6 +70,10 @@ class OrgMember(Base, TimestampMixin):
         ),
         default="member",
     )
+    # What the org's identity provider last asserted about this member:
+    # {"display_name", "groups", "roles"} (Task E3). Officium maps "roles"
+    # to sys_user_role. Never changes `role` above: an IdP cannot make owners.
+    sso_attributes: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
 
 
 class OrgGroup(Base, TimestampMixin):

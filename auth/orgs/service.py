@@ -79,12 +79,9 @@ def validate_settings(settings: Any) -> None:
     if saml is not None:
         if not isinstance(saml, dict):
             raise OrgError(status_code=422, detail="settings.saml must be a JSON object")
-        try:
-            from core.auth.saml.config import validate_saml_settings
-        except ImportError:  # Task E3 adds the SAML package; until then the shape is all we check
-            validate_saml_settings = None
-        if validate_saml_settings is not None:
-            validate_saml_settings(saml)
+        from core.auth.saml.config import validate_saml_settings
+
+        validate_saml_settings(saml)
     try:
         size = len(json.dumps(settings))
     except (TypeError, ValueError):

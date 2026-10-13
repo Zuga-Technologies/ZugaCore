@@ -1073,6 +1073,7 @@ _USER_DEPENDENT_TABLES: tuple[str, ...] = (
     "mood_entries",
     "org_group_member",
     "org_member",
+    "saml_identity",
     "spiritus_consents",
     "spiritus_zugabot_outbox",
     "subscription",
