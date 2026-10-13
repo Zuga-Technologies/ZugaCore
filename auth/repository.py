@@ -4,10 +4,35 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+from fastapi import HTTPException
 from sqlalchemy import select
 
-from core.auth.models import UserRecord, ZugabotConsent
+from core.auth.models import VERIFIED_PROVIDERS, UserRecord, ZugabotConsent
 from core.database.session import get_session
+
+ORG_MANAGED_DETAIL = (
+    "This address is managed by your organisation's sign-in. "
+    "Use your organisation's single sign-on to access it."
+)
+
+
+def is_org_managed(user: UserRecord | None) -> bool:
+    """Was this account provisioned by an organisation's SCIM or SAML?"""
+    return user is not None and bool(user.identity_source)
+
+
+def _refuse_org_managed(user: UserRecord | None) -> None:
+    """The local sign-in paths (password, Google, OAuth, dev) must never take
+    over an org-provisioned account: that is the pre-provisioning takeover
+    (an org creates a row for an address it does not own; the real owner
+    signs in later and the org's IdP can then mint sessions for them)."""
+    if is_org_managed(user):
+        raise HTTPException(status_code=403, detail=ORG_MANAGED_DETAIL)
+
+
+async def refuse_if_org_managed(email: str) -> None:
+    """403 when `email` belongs to an org-provisioned account."""
+    _refuse_org_managed(await get_user_by_email(email.strip().lower()))
 
 
 def _parse_allowed_emails() -> dict[str, str]:
@@ -51,9 +76,13 @@ async def upsert_user(
             select(UserRecord).where(UserRecord.email == email)
         )
         user = result.scalar_one_or_none()
+        _refuse_org_managed(user)
 
         role = "admin" if _is_admin_email(email) else "user"
-        auto_verify = auth_provider == "google"
+        # A Google / GitHub / Microsoft / Apple sign-in reaches here only after
+        # the route checked that the provider verified the address
+        # (auth.routes.oauth_login, verify_google_token), so the mailbox is proven.
+        auto_verify = auth_provider in VERIFIED_PROVIDERS
 
         if user is None:
             user = UserRecord(
@@ -129,13 +158,19 @@ async def get_user_by_id(user_id: str) -> UserRecord | None:
         return result.scalar_one_or_none()
 
 
-async def link_supertokens_id(email: str, st_user_id: str) -> None:
-    """Link a SuperTokens user ID to an existing user record."""
+async def link_supertokens_id(email: str, st_user_id: str, *, allow_org_managed: bool = False) -> None:
+    """Link a SuperTokens user ID to an existing user record.
+
+    Refuses (403) for an org-provisioned account unless the caller is that
+    org's SSO (core.auth.saml.service._mint_session passes allow_org_managed).
+    """
     async with get_session() as session:
         result = await session.execute(
             select(UserRecord).where(UserRecord.email == email)
         )
         user = result.scalar_one_or_none()
+        if not allow_org_managed:
+            _refuse_org_managed(user)
         if user is not None:
             user.supertokens_user_id = st_user_id
 

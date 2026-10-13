@@ -261,6 +261,15 @@ def test_settings_known_keys_are_typed(ent, bad):
     assert r.status_code == 422, r.text
 
 
+def test_sso_settings_are_owner_only_checked_before_validation(ent):
+    oid = _create_org(ent)["id"]
+    ent.post(f"/api/orgs/{oid}/members", json={"user_id": "u2", "role": "admin"}, headers=_as("u1"))
+    assert ent.patch(f"/api/orgs/{oid}", json={"settings": {"saml": {}}}, headers=_as("u2")).status_code == 403
+    assert ent.patch(f"/api/orgs/{oid}", json={"settings": {"saml": None}}, headers=_as("u2")).status_code == 403
+    assert ent.patch(f"/api/orgs/{oid}", json={"settings": {"saml": {}}}, headers=_as("u1")).status_code == 422
+    assert ent.patch(f"/api/orgs/{oid}", json={"settings": {"theme": "dark"}}, headers=_as("u2")).status_code == 200
+
+
 def test_rename_org(ent):
     oid = _create_org(ent)["id"]
     r = ent.patch(f"/api/orgs/{oid}", json={"name": "Acme Corp"}, headers=_as("u1"))

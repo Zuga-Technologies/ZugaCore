@@ -19,7 +19,9 @@
 Who may do what, and which status each refusal gets, is documented and
 enforced in core.auth.orgs.service; this file only shapes requests and
 responses. `settings` is returned to owners and admins only: a plain member
-gets `{}`.
+gets `{}`. Every route addressed to an org applies that org's MFA
+requirement (403 {"code": "mfa_required"}); listing my orgs and leaving one
+do not.
 """
 
 from typing import Any, Literal
@@ -136,26 +138,26 @@ async def list_orgs(user: CurrentUser = Depends(get_current_user)) -> list[OrgOu
 
 @router.post("", response_model=OrgOut, status_code=201)
 async def create_org(body: OrgCreate, user: CurrentUser = Depends(get_current_user)) -> OrgOut:
-    org, role = await service.create_org(user.id, body.name, body.slug)
+    org, role = await service.create_org(user, body.name, body.slug)
     return _org_out(org, role)
 
 
 @router.get("/by-slug/{slug}", response_model=OrgOut)
 async def get_org_by_slug(slug: str, user: CurrentUser = Depends(get_current_user)) -> OrgOut:
-    org, membership = await service.get_org_by_slug_for_user(slug, user.id)
+    org, membership = await service.get_org_by_slug_for_user(slug, user)
     return _org_out(org, membership.role)
 
 
 @router.get("/{org_id}", response_model=OrgOut)
 async def get_org(org_id: str, user: CurrentUser = Depends(get_current_user)) -> OrgOut:
-    org, membership = await service.get_org_for_user(org_id, user.id)
+    org, membership = await service.get_org_for_user(org_id, user)
     return _org_out(org, membership.role)
 
 
 @router.patch("/{org_id}", response_model=OrgOut)
 async def patch_org(org_id: str, body: OrgPatch, user: CurrentUser = Depends(get_current_user)) -> OrgOut:
     org, membership = await service.update_org(
-        org_id, user.id, name=body.name, settings_patch=body.settings
+        org_id, user, name=body.name, settings_patch=body.settings
     )
     return _org_out(org, membership.role)
 
@@ -165,13 +167,13 @@ async def patch_org(org_id: str, body: OrgPatch, user: CurrentUser = Depends(get
 
 @router.get("/{org_id}/members", response_model=list[MemberOut])
 async def list_members(org_id: str, user: CurrentUser = Depends(get_current_user)) -> list[MemberOut]:
-    return [_member_out(m, u) for m, u in await service.list_members(org_id, user.id)]
+    return [_member_out(m, u) for m, u in await service.list_members(org_id, user)]
 
 
 @router.post("/{org_id}/members", response_model=MemberOut, status_code=201)
 async def add_member(org_id: str, body: MemberAdd, user: CurrentUser = Depends(get_current_user)) -> MemberOut:
     membership, target = await service.add_member(
-        org_id, user.id, user_id=body.user_id, email=body.email, role=body.role
+        org_id, user, user_id=body.user_id, email=body.email, role=body.role
     )
     return _member_out(membership, target)
 
@@ -180,13 +182,13 @@ async def add_member(org_id: str, body: MemberAdd, user: CurrentUser = Depends(g
 async def patch_member(
     org_id: str, user_id: str, body: MemberPatch, user: CurrentUser = Depends(get_current_user)
 ) -> MemberOut:
-    membership, target = await service.set_member_role(org_id, user.id, user_id, body.role)
+    membership, target = await service.set_member_role(org_id, user, user_id, body.role)
     return _member_out(membership, target)
 
 
 @router.delete("/{org_id}/members/{user_id}", status_code=204, response_class=Response)
 async def remove_member(org_id: str, user_id: str, user: CurrentUser = Depends(get_current_user)) -> Response:
-    await service.remove_member(org_id, user.id, user_id)
+    await service.remove_member(org_id, user, user_id)
     return Response(status_code=204)
 
 
@@ -195,18 +197,18 @@ async def remove_member(org_id: str, user_id: str, user: CurrentUser = Depends(g
 
 @router.get("/{org_id}/groups", response_model=list[GroupOut])
 async def list_groups(org_id: str, user: CurrentUser = Depends(get_current_user)) -> list[GroupOut]:
-    return [_group_out(g, n) for g, n in await service.list_groups(org_id, user.id)]
+    return [_group_out(g, n) for g, n in await service.list_groups(org_id, user)]
 
 
 @router.post("/{org_id}/groups", response_model=GroupOut, status_code=201)
 async def create_group(org_id: str, body: GroupCreate, user: CurrentUser = Depends(get_current_user)) -> GroupOut:
-    group = await service.create_group(org_id, user.id, body.name, body.external_id)
+    group = await service.create_group(org_id, user, body.name, body.external_id)
     return _group_out(group, 0)
 
 
 @router.delete("/{org_id}/groups/{group_id}", status_code=204, response_class=Response)
 async def delete_group(org_id: str, group_id: str, user: CurrentUser = Depends(get_current_user)) -> Response:
-    await service.delete_group(org_id, user.id, group_id)
+    await service.delete_group(org_id, user, group_id)
     return Response(status_code=204)
 
 
@@ -214,7 +216,7 @@ async def delete_group(org_id: str, group_id: str, user: CurrentUser = Depends(g
 async def list_group_members(
     org_id: str, group_id: str, user: CurrentUser = Depends(get_current_user)
 ) -> list[GroupMemberOut]:
-    users = await service.list_group_members(org_id, user.id, group_id)
+    users = await service.list_group_members(org_id, user, group_id)
     return [GroupMemberOut(user_id=u.id, email=u.email, name=u.name) for u in users]
 
 
@@ -222,7 +224,7 @@ async def list_group_members(
 async def add_group_member(
     org_id: str, group_id: str, user_id: str, user: CurrentUser = Depends(get_current_user)
 ) -> Response:
-    await service.add_group_member(org_id, user.id, group_id, user_id)
+    await service.add_group_member(org_id, user, group_id, user_id)
     return Response(status_code=204)
 
 
@@ -230,5 +232,5 @@ async def add_group_member(
 async def remove_group_member(
     org_id: str, group_id: str, user_id: str, user: CurrentUser = Depends(get_current_user)
 ) -> Response:
-    await service.remove_group_member(org_id, user.id, group_id, user_id)
+    await service.remove_group_member(org_id, user, group_id, user_id)
     return Response(status_code=204)

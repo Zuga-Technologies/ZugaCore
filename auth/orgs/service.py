@@ -5,10 +5,11 @@ Two layers:
 * Session-level helpers (leading underscore) take an AsyncSession and do one
   thing with no permission check. SAML JIT provisioning and SCIM use these as
   system actors.
-* The public functions open their own `get_session()` (one transaction each,
-  committed on clean exit, like core.auth.repository) and check the acting
-  user's role INSIDE that same transaction, so a role revoked between "may I"
-  and "do it" cannot slip through.
+* The public functions take the acting user (a CurrentUser), open their own
+  `get_session()` (one transaction each, committed on clean exit, like
+  core.auth.repository) and check that user's role INSIDE that same
+  transaction, so a role revoked between "may I" and "do it" cannot slip
+  through.
 
 Refusals are raised as OrgError, an HTTPException, the way auth.routes'
 helpers already raise HTTPException from below the route layer. The status
@@ -16,16 +17,25 @@ codes mean:
 
     404  the caller is not a member of that org (or it does not exist). A
          non-member never learns whether an org id is real.
-    403  the caller is a member but their role may not do this.
+    403  the caller is a member but their role may not do this, or the org
+         requires MFA and this session has not passed it (detail carries
+         {"code": "mfa_required"}; see core.auth.mfa.service.gate_for_org).
     409  the change would break an invariant (duplicate slug, duplicate
          member, last owner, group member outside the org).
     422  a settings value has the wrong type.
 
 Role rules: an owner may do everything. An admin may add plain members,
-change plain members, remove plain members, and manage groups and settings;
-an admin may never grant, change or remove an owner or another admin. Any
-non-owner may remove themselves (leave). The last owner can be neither
-removed nor demoted, so an org can never become ownerless through this API.
+change plain members, remove plain members, and manage groups and settings
+EXCEPT single sign-on (`settings.saml`): whoever controls the IdP
+certificate can sign in as every SSO member, so that is owner-only. An
+admin may never grant, change or remove an owner or another admin. Any
+non-owner may remove themselves (leave), and leaving is never gated by the
+org's MFA requirement. The last owner can be neither removed nor demoted,
+so an org can never become ownerless through this API.
+
+The MFA requirement is per org: `_require_membership` applies it to every
+operation addressed to that org, and nowhere else. One org's setting can
+never gate a user out of the platform or out of other orgs.
 """
 
 import json
@@ -37,7 +47,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.auth.models import UserRecord
+from core.auth.models import CurrentUser, UserRecord
 from core.auth.orgs.models import ORG_ROLES, Org, OrgGroup, OrgGroupMember, OrgMember
 from core.database.session import get_session
 
@@ -47,6 +57,7 @@ SLUG_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
 _SLUG_RE = re.compile(SLUG_PATTERN)
 
 MANAGER_ROLES: tuple[str, ...] = ("owner", "admin")
+OWNER_ONLY: tuple[str, ...] = ("owner",)
 _SETTINGS_MAX_BYTES = 64 * 1024
 
 
@@ -115,16 +126,28 @@ async def _get_membership(
 async def _require_membership(
     session: AsyncSession,
     org_id: str,
-    user_id: str,
+    actor: CurrentUser,
     roles: tuple[str, ...] | None = None,
+    *,
+    gate: bool = True,
 ) -> tuple[Org, OrgMember]:
-    """The org and the caller's membership of it, or 404 (not a member) / 403 (wrong role)."""
+    """The org and the caller's membership of it, or 404 (not a member) /
+    403 (wrong role) / 403 mfa_required (the org requires MFA and this
+    session has not passed it; skipped with gate=False, used only for
+    leaving the org).
+    """
     org = await _get_org(session, org_id)
-    membership = await _get_membership(session, org_id, user_id) if org is not None else None
+    membership = await _get_membership(session, org_id, actor.id) if org is not None else None
     if org is None or membership is None:
         raise OrgError(status_code=404, detail="Organisation not found")
     if roles is not None and membership.role not in roles:
+        if roles == OWNER_ONLY:
+            raise OrgError(status_code=403, detail="Only an organisation owner can do that")
         raise OrgError(status_code=403, detail="Only an organisation owner or admin can do that")
+    if gate:
+        from core.auth.mfa.service import gate_for_org
+
+        await gate_for_org(session, org, actor)
     return org, membership
 
 
@@ -193,7 +216,7 @@ async def _create_group(session: AsyncSession, org_id: str, name: str, external_
 
 
 async def _add_group_member(session: AsyncSession, group: OrgGroup, user_id: str) -> bool:
-    """Put an org member in a group. Idempotent; 409 if they are not in the org."""
+    """Put an active org member in a group. Idempotent; 409 if they are not in the org."""
     if await _get_membership(session, group.org_id, user_id) is None:
         raise OrgError(status_code=409, detail="That user is not a member of this organisation")
     exists = await session.scalar(
@@ -229,7 +252,7 @@ async def _member_count_by_group(session: AsyncSession, org_id: str) -> dict[str
 # ── public API (acting user checked inside the same transaction) ────────
 
 
-async def create_org(actor_user_id: str, name: str, slug: str) -> tuple[Org, str]:
+async def create_org(actor: CurrentUser, name: str, slug: str) -> tuple[Org, str]:
     """Create an org; the creator becomes its owner. Any signed-in user may."""
     slug = slug.strip().lower()
     if not _SLUG_RE.match(slug):
@@ -247,12 +270,13 @@ async def create_org(actor_user_id: str, name: str, slug: str) -> tuple[Org, str
         except IntegrityError:
             # two creates raced for the same slug; the loser answers like the check
             raise OrgError(status_code=409, detail="That slug is already taken")
-        await _add_membership(session, org.id, actor_user_id, "owner")
+        await _add_membership(session, org.id, actor.id, "owner")
         return org, "owner"
 
 
 async def list_orgs_for_user(user_id: str) -> list[tuple[Org, str]]:
-    """Every org the user belongs to, with their role, by name."""
+    """Every org the user belongs to, with their role, by name. Not gated:
+    this is "which orgs am I in", addressed to no org in particular."""
     async with get_session() as session:
         rows = await session.execute(
             select(Org, OrgMember.role)
@@ -263,33 +287,36 @@ async def list_orgs_for_user(user_id: str) -> list[tuple[Org, str]]:
         return [(org, role) for org, role in rows.all()]
 
 
-async def get_org_for_user(org_id: str, user_id: str) -> tuple[Org, OrgMember]:
+async def get_org_for_user(org_id: str, actor: CurrentUser) -> tuple[Org, OrgMember]:
     async with get_session() as session:
-        return await _require_membership(session, org_id, user_id)
+        return await _require_membership(session, org_id, actor)
 
 
-async def get_org_by_slug_for_user(slug: str, user_id: str) -> tuple[Org, OrgMember]:
+async def get_org_by_slug_for_user(slug: str, actor: CurrentUser) -> tuple[Org, OrgMember]:
     async with get_session() as session:
         org = await _get_org_by_slug(session, slug.strip().lower())
         if org is None:
             raise OrgError(status_code=404, detail="Organisation not found")
-        return await _require_membership(session, org.id, user_id)
+        return await _require_membership(session, org.id, actor)
 
 
 async def update_org(
     org_id: str,
-    actor_user_id: str,
+    actor: CurrentUser,
     *,
     name: str | None = None,
     settings_patch: dict[str, Any] | None = None,
 ) -> tuple[Org, OrgMember]:
-    """Rename and/or patch settings. Owner or admin only.
+    """Rename and/or patch settings. Owner or admin; `settings.saml` owner only.
 
     `settings_patch` is a shallow merge over the stored object: keys given
     replace the stored key, a null value removes it, keys not given survive.
     """
+    touches_sso = settings_patch is not None and "saml" in settings_patch
     async with get_session() as session:
-        org, membership = await _require_membership(session, org_id, actor_user_id, MANAGER_ROLES)
+        org, membership = await _require_membership(
+            session, org_id, actor, OWNER_ONLY if touches_sso else MANAGER_ROLES
+        )
         if name is not None:
             name = name.strip()
             if not name:
@@ -308,10 +335,10 @@ async def update_org(
         return org, membership
 
 
-async def list_members(org_id: str, actor_user_id: str) -> list[tuple[OrgMember, UserRecord]]:
+async def list_members(org_id: str, actor: CurrentUser) -> list[tuple[OrgMember, UserRecord]]:
     """Every member with their user row. Any member may list."""
     async with get_session() as session:
-        await _require_membership(session, org_id, actor_user_id)
+        await _require_membership(session, org_id, actor)
         rows = await session.execute(
             select(OrgMember, UserRecord)
             .join(UserRecord, UserRecord.id == OrgMember.user_id)
@@ -323,7 +350,7 @@ async def list_members(org_id: str, actor_user_id: str) -> list[tuple[OrgMember,
 
 async def add_member(
     org_id: str,
-    actor_user_id: str,
+    actor: CurrentUser,
     *,
     user_id: str | None = None,
     email: str | None = None,
@@ -333,8 +360,8 @@ async def add_member(
     if role not in ORG_ROLES:
         raise OrgError(status_code=422, detail=f"role must be one of {', '.join(ORG_ROLES)}")
     async with get_session() as session:
-        _, actor = await _require_membership(session, org_id, actor_user_id, MANAGER_ROLES)
-        if not _can_assign(actor.role, role):
+        _, actor_m = await _require_membership(session, org_id, actor, MANAGER_ROLES)
+        if not _can_assign(actor_m.role, role):
             raise OrgError(status_code=403, detail="Only an owner can grant the admin or owner role")
         user = await _get_user(session, user_id=user_id, email=email)
         if user is None:
@@ -343,15 +370,15 @@ async def add_member(
         return membership, user
 
 
-async def set_member_role(org_id: str, actor_user_id: str, user_id: str, role: str) -> tuple[OrgMember, UserRecord]:
+async def set_member_role(org_id: str, actor: CurrentUser, user_id: str, role: str) -> tuple[OrgMember, UserRecord]:
     if role not in ORG_ROLES:
         raise OrgError(status_code=422, detail=f"role must be one of {', '.join(ORG_ROLES)}")
     async with get_session() as session:
-        _, actor = await _require_membership(session, org_id, actor_user_id, MANAGER_ROLES)
+        _, actor_m = await _require_membership(session, org_id, actor, MANAGER_ROLES)
         target = await _get_membership(session, org_id, user_id, include_inactive=True)
         if target is None:
             raise OrgError(status_code=404, detail="That user is not a member of this organisation")
-        if not _can_touch(actor.role, target.role) or not _can_assign(actor.role, role):
+        if not _can_touch(actor_m.role, target.role) or not _can_assign(actor_m.role, role):
             raise OrgError(status_code=403, detail="Only an owner can change an owner's or admin's role")
         if target.role == "owner" and role != "owner" and await _count_owners(session, org_id) <= 1:
             raise OrgError(status_code=409, detail="An organisation must keep at least one owner")
@@ -360,24 +387,27 @@ async def set_member_role(org_id: str, actor_user_id: str, user_id: str, role: s
         return target, user
 
 
-async def remove_member(org_id: str, actor_user_id: str, user_id: str) -> None:
+async def remove_member(org_id: str, actor: CurrentUser, user_id: str) -> None:
+    """Remove a member, or leave. Leaving is never gated by the org's MFA
+    requirement: a person put into a strict org must always be able to get
+    back out of it."""
+    leaving = actor.id == user_id
     async with get_session() as session:
-        _, actor = await _require_membership(session, org_id, actor_user_id)
+        _, actor_m = await _require_membership(session, org_id, actor, gate=not leaving)
         target = await _get_membership(session, org_id, user_id, include_inactive=True)
         if target is None:
             raise OrgError(status_code=404, detail="That user is not a member of this organisation")
-        leaving = actor.user_id == user_id
-        if not leaving and (actor.role not in MANAGER_ROLES or not _can_touch(actor.role, target.role)):
+        if not leaving and (actor_m.role not in MANAGER_ROLES or not _can_touch(actor_m.role, target.role)):
             raise OrgError(status_code=403, detail="Only an owner can remove an owner or admin")
         if target.role == "owner" and await _count_owners(session, org_id) <= 1:
             raise OrgError(status_code=409, detail="An organisation must keep at least one owner")
         await _remove_membership(session, org_id, user_id)
 
 
-async def list_groups(org_id: str, actor_user_id: str) -> list[tuple[OrgGroup, int]]:
+async def list_groups(org_id: str, actor: CurrentUser) -> list[tuple[OrgGroup, int]]:
     """Every group with its member count. Any member may list."""
     async with get_session() as session:
-        await _require_membership(session, org_id, actor_user_id)
+        await _require_membership(session, org_id, actor)
         groups = (
             await session.scalars(select(OrgGroup).where(OrgGroup.org_id == org_id).order_by(OrgGroup.name))
         ).all()
@@ -385,18 +415,18 @@ async def list_groups(org_id: str, actor_user_id: str) -> list[tuple[OrgGroup, i
         return [(g, counts.get(g.id, 0)) for g in groups]
 
 
-async def create_group(org_id: str, actor_user_id: str, name: str, external_id: str | None = None) -> OrgGroup:
+async def create_group(org_id: str, actor: CurrentUser, name: str, external_id: str | None = None) -> OrgGroup:
     name = name.strip()
     if not name:
         raise OrgError(status_code=422, detail="name must not be empty")
     async with get_session() as session:
-        await _require_membership(session, org_id, actor_user_id, MANAGER_ROLES)
+        await _require_membership(session, org_id, actor, MANAGER_ROLES)
         return await _create_group(session, org_id, name, external_id)
 
 
-async def delete_group(org_id: str, actor_user_id: str, group_id: str) -> None:
+async def delete_group(org_id: str, actor: CurrentUser, group_id: str) -> None:
     async with get_session() as session:
-        await _require_membership(session, org_id, actor_user_id, MANAGER_ROLES)
+        await _require_membership(session, org_id, actor, MANAGER_ROLES)
         group = await _get_group(session, org_id, group_id)
         if group is None:
             raise OrgError(status_code=404, detail="Group not found")
@@ -404,9 +434,9 @@ async def delete_group(org_id: str, actor_user_id: str, group_id: str) -> None:
         await session.delete(group)
 
 
-async def list_group_members(org_id: str, actor_user_id: str, group_id: str) -> list[UserRecord]:
+async def list_group_members(org_id: str, actor: CurrentUser, group_id: str) -> list[UserRecord]:
     async with get_session() as session:
-        await _require_membership(session, org_id, actor_user_id)
+        await _require_membership(session, org_id, actor)
         group = await _get_group(session, org_id, group_id)
         if group is None:
             raise OrgError(status_code=404, detail="Group not found")
@@ -419,18 +449,18 @@ async def list_group_members(org_id: str, actor_user_id: str, group_id: str) -> 
         return list(rows.all())
 
 
-async def add_group_member(org_id: str, actor_user_id: str, group_id: str, user_id: str) -> None:
+async def add_group_member(org_id: str, actor: CurrentUser, group_id: str, user_id: str) -> None:
     async with get_session() as session:
-        await _require_membership(session, org_id, actor_user_id, MANAGER_ROLES)
+        await _require_membership(session, org_id, actor, MANAGER_ROLES)
         group = await _get_group(session, org_id, group_id)
         if group is None:
             raise OrgError(status_code=404, detail="Group not found")
         await _add_group_member(session, group, user_id)
 
 
-async def remove_group_member(org_id: str, actor_user_id: str, group_id: str, user_id: str) -> None:
+async def remove_group_member(org_id: str, actor: CurrentUser, group_id: str, user_id: str) -> None:
     async with get_session() as session:
-        await _require_membership(session, org_id, actor_user_id, MANAGER_ROLES)
+        await _require_membership(session, org_id, actor, MANAGER_ROLES)
         group = await _get_group(session, org_id, group_id)
         if group is None:
             raise OrgError(status_code=404, detail="Group not found")

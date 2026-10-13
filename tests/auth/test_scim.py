@@ -127,12 +127,17 @@ def test_minting_again_revokes_the_old_token(ent, scim):
     assert ent.get(f"/api/orgs/{oid}/scim/token", headers=_as("u1")).json()["configured"] is False
 
 
-def test_only_owners_and_admins_mint_tokens(ent, scim):
+def test_only_owners_mint_tokens_admins_may_look(ent, scim):
+    """Whoever holds the token provisions accounts the org's IdP can sign in,
+    so minting and revoking are owner-only (review S9); admins see the status."""
     oid = scim["org"]["id"]
-    ent.post(f"/api/orgs/{oid}/members", json={"user_id": "u2"}, headers=_as("u1"))
+    ent.post(f"/api/orgs/{oid}/members", json={"user_id": "u2", "role": "admin"}, headers=_as("u1"))
+    assert ent.post(f"/api/orgs/{oid}/scim/token", headers=_as("u2")).status_code == 403
+    assert ent.delete(f"/api/orgs/{oid}/scim/token", headers=_as("u2")).status_code == 403
+    assert ent.get(f"/api/orgs/{oid}/scim/token", headers=_as("u2")).status_code == 200
+    ent.patch(f"/api/orgs/{oid}/members/u2", json={"role": "member"}, headers=_as("u1"))
     assert ent.post(f"/api/orgs/{oid}/scim/token", headers=_as("u2")).status_code == 403
     assert ent.get(f"/api/orgs/{oid}/scim/token", headers=_as("u2")).status_code == 403
-    assert ent.delete(f"/api/orgs/{oid}/scim/token", headers=_as("u2")).status_code == 403
     assert ent.post(f"/api/orgs/{oid}/scim/token").status_code == 401
     assert ent.post("/api/orgs/nope/scim/token", headers=_as("u1")).status_code == 404
 
@@ -189,6 +194,7 @@ def test_create_get_user(ent, scim, db):
     user = db.run_until_complete(get_user_by_email("jane@customer.example"))
     assert user.id == body["id"] and user.auth_provider == "scim" and user.role == "user"
     assert user.email_verified is False and user.name == "Jane Doe"
+    assert user.identity_source == f"org:{scim['org']['id']}"  # this org is the account's authority
 
     # the IdP can now sign this account in: bindings for userName, email and externalId
     from core.auth.saml.models import SamlIdentity
@@ -317,30 +323,29 @@ def test_put_replaces_the_user(ent, scim):
     assert "externalId" not in r.json()  # PUT replaces: the omitted externalId is cleared
 
 
-def test_existing_account_is_linked_but_not_owned(ent, scim, db):
-    """u2 has an account already. Provisioning u2 adds the membership only."""
+def test_existing_local_account_is_never_provisioned_over(ent, scim, db):
+    """u2 has a local account already. SCIM may not create, link or rename it:
+    409 + audit (review S1). No automatic linking in either direction."""
     r = ent.post(f"{SCIM}/Users", json=_user_body("u2@example.com", displayName="Spoofed Name"), headers=scim["h"])
-    assert r.status_code == 201, r.text
-    assert r.json()["id"] == "u2" and r.json()["displayName"] == "Spoofed Name"
+    assert r.status_code == 409, r.text
+    assert r.json()["scimType"] == "uniqueness" and r.json()["schemas"] == [ERROR_SCHEMA]
+    rows = _audit(db, "scim.user")
+    assert rows and rows[-1].outcome == "refused" and rows[-1].subject == "u2@example.com"
 
     from core.auth.repository import get_user_by_id
     from core.auth.saml.models import SamlIdentity
     from core.database.session import get_session
 
     assert db.run_until_complete(get_user_by_id("u2")).name is None  # the global name was not touched
+    assert db.run_until_complete(get_user_by_id("u2")).identity_source is None
 
     async def _bindings():
         async with get_session() as s:
             return (await s.scalars(select(SamlIdentity).where(SamlIdentity.user_id == "u2"))).all()
 
-    assert db.run_until_complete(_bindings()) == []  # no SSO binding: SAML cannot sign in as u2
-
-    ops = [{"op": "replace", "path": "userName", "value": "owned@customer.example"}]
-    r = ent.patch(f"{SCIM}/Users/u2", json={"schemas": [PATCH_SCHEMA], "Operations": ops}, headers=scim["h"])
-    assert r.status_code == 400 and r.json()["scimType"] == "mutability"
-    assert db.run_until_complete(get_user_by_id("u2")).email == "u2@example.com"
-    # a second POST for the same account is a conflict, not a second membership
-    assert ent.post(f"{SCIM}/Users", json=_user_body("u2@example.com"), headers=scim["h"]).status_code == 409
+    assert db.run_until_complete(_bindings()) == []
+    assert ent.get(f"{SCIM}/Users/u2", headers=scim["h"]).status_code == 404  # not a SCIM resource of this org
+    assert ent.get("/api/orgs", headers=_as("u2")).json() == []  # no membership either
 
 
 def test_delete_user_removes_membership_and_keeps_the_account(ent, scim, db):
@@ -386,9 +391,15 @@ def test_group_lifecycle(ent, scim):
     r = ent.patch(f"{SCIM}/Groups/{g['id']}", json={"schemas": [PATCH_SCHEMA], "Operations": [{"op": "Add", "value": {"members": [{"value": bob["id"]}]}}]}, headers=scim["h"])
     assert r.status_code == 200 and len(r.json()["members"]) == 2
 
-    # someone who is not in the org cannot be put in the group
+    # someone who is not in the org cannot be put in the group, nor a deactivated member (review S13)
     r = ent.patch(f"{SCIM}/Groups/{g['id']}", json={"schemas": [PATCH_SCHEMA], "Operations": [{"op": "add", "path": "members", "value": [{"value": "u2"}]}]}, headers=scim["h"])
     assert r.status_code == 400 and r.json()["scimType"] == "invalidValue"
+    ent.patch(f"{SCIM}/Users/{bob['id']}", json={"schemas": [PATCH_SCHEMA], "Operations": [{"op": "replace", "path": "active", "value": False}]}, headers=scim["h"])
+    r = ent.patch(f"{SCIM}/Groups/{g['id']}", json={"schemas": [PATCH_SCHEMA], "Operations": [{"op": "replace", "path": "members", "value": [{"value": jane["id"]}, {"value": bob["id"]}]}]}, headers=scim["h"])
+    assert r.status_code == 400 and r.json()["scimType"] == "invalidValue" and "active" in r.json()["detail"]
+    ent.patch(f"{SCIM}/Users/{bob['id']}", json={"schemas": [PATCH_SCHEMA], "Operations": [{"op": "replace", "path": "active", "value": True}]}, headers=scim["h"])
+    r = ent.patch(f"{SCIM}/Groups/{g['id']}", json={"schemas": [PATCH_SCHEMA], "Operations": [{"op": "replace", "path": "members", "value": [{"value": jane["id"]}, {"value": bob["id"]}]}]}, headers=scim["h"])
+    assert r.status_code == 200 and len(r.json()["members"]) == 2
 
     listed = ent.get(f"{SCIM}/Groups", params={"filter": 'displayName eq "platform"'}, headers=scim["h"]).json()
     assert listed["totalResults"] == 1 and listed["Resources"][0]["id"] == g["id"]

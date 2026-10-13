@@ -64,6 +64,14 @@ async def run_auth_migrations(db_path: str) -> None:
             )
             logger.info("Migration: added bg_theme_pref column to users")
 
+        # identity_source: NULL for local accounts, "org:<id>" for accounts an
+        # organisation's SCIM/SAML provisioned (enterprise identity, Lane E).
+        if not await _column_exists(db, "users", "identity_source"):
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN identity_source VARCHAR(64) DEFAULT NULL"
+            )
+            logger.info("Migration: added identity_source column to users")
+
         await db.commit()
 
     logger.info("Auth migrations complete")

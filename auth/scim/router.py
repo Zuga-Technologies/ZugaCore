@@ -25,9 +25,9 @@ the token is the only thing that says which org a request is about.
 The token is managed by the org's owners and admins on the ordinary API
 (`token_router`, mounted next to /api/orgs):
 
-    GET    /api/orgs/{org_id}/scim/token      configured? prefix, last used
-    POST   /api/orgs/{org_id}/scim/token      mint (shown once; revokes the old one)
-    DELETE /api/orgs/{org_id}/scim/token      revoke
+    GET    /api/orgs/{org_id}/scim/token      configured? prefix, last used (owner, admin)
+    POST   /api/orgs/{org_id}/scim/token      mint (shown once; revokes the old one) (owner)
+    DELETE /api/orgs/{org_id}/scim/token      revoke (owner)
 """
 
 from datetime import datetime
@@ -43,8 +43,11 @@ from core.auth.enterprise import require_enterprise
 from core.auth.middleware import get_current_user
 from core.auth.models import CurrentUser
 from core.auth.orgs.models import Org
+from core.auth.ratelimit import check_rate_limit
 from core.auth.scim import schemas, service
 from core.auth.scim.schemas import ScimError, scim_json
+
+AUTH_FAILURES_PER_MINUTE = 30
 
 # ── the SCIM sub-application ────────────────────────────────────────────
 
@@ -68,6 +71,12 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> Re
     return scim_json(schemas.error_body(400, f"{where}: {first.get('msg', 'invalid')}", "invalidSyntax"), 400)
 
 
+@scim_app.exception_handler(Exception)
+async def _unexpected_error(request: Request, exc: Exception) -> Response:
+    # a bug in a service function still answers in the RFC 7644 shape (no internals leaked)
+    return scim_json(schemas.error_body(500, "Internal error"), 500)
+
+
 async def require_scim_org(request: Request) -> Org:
     """The org whose live SCIM token is in Authorization: Bearer; 401 (and an audit row) otherwise."""
     header = request.headers.get("Authorization", "")
@@ -75,6 +84,7 @@ async def require_scim_org(request: Request) -> Org:
     org = await service.org_for_token(token) if token else None
     if org is None:
         ip = request.client.host if request.client else None
+        check_rate_limit(f"scim-auth:{ip or 'unknown'}", AUTH_FAILURES_PER_MINUTE, 60)
         await audit.record(
             service.KIND_AUTH, "refused", ip=ip,
             detail="missing bearer token" if not token else f"unknown or revoked token {token[:8]}",
@@ -195,15 +205,15 @@ class ScimTokenStatus(BaseModel):
 
 @token_router.get("/{org_id}/scim/token", response_model=ScimTokenStatus)
 async def scim_token_status(org_id: str, user: CurrentUser = Depends(get_current_user)) -> ScimTokenStatus:
-    return ScimTokenStatus(**await service.token_status(org_id, user.id))
+    return ScimTokenStatus(**await service.token_status(org_id, user))
 
 
 @token_router.post("/{org_id}/scim/token", response_model=ScimTokenMinted, status_code=201)
 async def scim_token_mint(org_id: str, user: CurrentUser = Depends(get_current_user)) -> ScimTokenMinted:
-    return ScimTokenMinted(**await service.mint_token(org_id, user.id))
+    return ScimTokenMinted(**await service.mint_token(org_id, user))
 
 
 @token_router.delete("/{org_id}/scim/token", status_code=204, response_class=Response)
 async def scim_token_revoke(org_id: str, user: CurrentUser = Depends(get_current_user)) -> Response:
-    await service.revoke_token(org_id, user.id)
+    await service.revoke_token(org_id, user)
     return Response(status_code=204)

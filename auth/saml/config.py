@@ -9,10 +9,14 @@ org.settings["saml"] (set by an owner/admin through PATCH /api/orgs/{id}):
     attribute_map  {"email": <attr>, "display_name": <attr>,
                     "groups": <attr>, "roles": <attr>}              optional
     redirect_url   where the browser lands after a successful ACS,
-                   "/path" or an absolute https URL; default
-                   WEBSITE_DOMAIN + "/auth/saml/callback"           optional
+                   "/path" or an absolute URL on WEBSITE_DOMAIN's
+                   origin; default WEBSITE_DOMAIN + "/auth/saml/callback"  optional
     enabled        false turns SSO off without losing the config    optional
     allow_sha1     accept RSA-SHA1 signatures (old ADFS); off       optional
+    allow_idp_initiated  accept responses that answer no request of
+                   ours (IdP-initiated SSO); off, because such a
+                   response can be planted in a victim's browser
+                   (login CSRF)                                     optional
 
 Anything else is a 422 so a typo (sso_URL) cannot silently disable SSO.
 
@@ -31,7 +35,9 @@ from fastapi import HTTPException
 
 from core.auth.config import get_api_domain, get_website_domain
 
-_KNOWN_KEYS = {"entity_id", "sso_url", "x509_cert", "attribute_map", "redirect_url", "enabled", "allow_sha1"}
+_KNOWN_KEYS = {
+    "entity_id", "sso_url", "x509_cert", "attribute_map", "redirect_url", "enabled", "allow_sha1", "allow_idp_initiated",
+}
 _MAP_KEYS = {"email", "display_name", "groups", "roles"}
 _PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)
 
@@ -102,21 +108,25 @@ def validate_saml_settings(saml: Any) -> None:
                 raise _bad(f"settings.saml.attribute_map.{k} must be an attribute name")
     redirect = saml.get("redirect_url")
     if redirect is not None and not _safe_redirect(redirect):
-        raise _bad('settings.saml.redirect_url must be "/path" or an absolute https URL')
-    for flag in ("enabled", "allow_sha1"):
+        raise _bad('settings.saml.redirect_url must be "/path" or an absolute URL on this site (WEBSITE_DOMAIN)')
+    for flag in ("enabled", "allow_sha1", "allow_idp_initiated"):
         if flag in saml and not isinstance(saml[flag], bool):
             raise _bad(f"settings.saml.{flag} must be true or false")
 
 
 def _safe_redirect(value: Any) -> bool:
+    """A same-site path, or an absolute URL on WEBSITE_DOMAIN's own origin.
+
+    The redirect carries the single-use session handoff code; an off-site
+    target would hand that code to whoever runs the target.
+    """
     if not isinstance(value, str) or len(value) > 2048:
         return False
     if value.startswith("/") and not value.startswith("//"):
-        return True
+        return "\\" not in value and "\n" not in value and "\r" not in value
     parts = urlsplit(value)
-    if parts.scheme == "https" and parts.netloc:
-        return True
-    return parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1")
+    site = urlsplit(get_website_domain())
+    return bool(parts.scheme) and (parts.scheme, parts.netloc.lower()) == (site.scheme, site.netloc.lower())
 
 
 def safe_relay_path(value: Any) -> str | None:
@@ -129,6 +139,10 @@ def safe_relay_path(value: Any) -> str | None:
 
 def is_enabled(saml: dict | None) -> bool:
     return bool(saml) and saml.get("enabled", True) is True
+
+
+def allows_idp_initiated(saml: dict | None) -> bool:
+    return bool(saml) and saml.get("allow_idp_initiated", False) is True
 
 
 def sp_urls(org_slug: str) -> dict[str, str]:

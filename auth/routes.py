@@ -9,18 +9,9 @@ from pydantic import BaseModel
 
 
 # ── Simple in-memory rate limiter ─────────────────────────────────
-_rate_buckets: dict[str, list[float]] = defaultdict(list)
-
-
-def _check_rate_limit(key: str, max_requests: int, window_seconds: int) -> None:
-    """Raise 429 if key has exceeded max_requests in the rolling window."""
-    now = time.monotonic()
-    bucket = _rate_buckets[key]
-    _rate_buckets[key] = [t for t in bucket if now - t < window_seconds]
-    bucket = _rate_buckets[key]
-    if len(bucket) >= max_requests:
-        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
-    bucket.append(now)
+# Lives in core.auth.ratelimit so the enterprise surface (SAML ACS, SCIM)
+# can share it without importing this module; the names here are kept.
+from core.auth.ratelimit import _rate_buckets, check_rate_limit as _check_rate_limit  # noqa: E402
 
 # One-time desktop handoff codes (D55) live in their own pure module so the
 # properties that make the handoff safe -- single use, TTL, unguessable --
@@ -59,12 +50,13 @@ from core.auth.config import (
     get_microsoft_client_id,
 )
 from core.auth.middleware import get_current_user, require_admin
-from core.auth.models import CurrentUser
+from core.auth.models import CurrentUser, identity_source_for
 from core.auth.repository import (
     _is_admin_email,
     get_onboarding_state,
     get_user_by_email,
     link_supertokens_id,
+    refuse_if_org_managed,
     set_auth_provider,
     set_email_verified,
     set_onboarding_state,
@@ -189,6 +181,12 @@ class UserResponse(BaseModel):
     avatar_url: str | None = None
     # Apps this ZugaID owns — the portal embeds these (admin owns-all).
     apps: list[str] = []
+    # Has the mailbox been proven (verification link, or a provider that
+    # asserts it)? Consumers adopt an unbound row by email only when true.
+    email_verified: bool = False
+    # "local", "google" / "github" / "microsoft" / "apple", or "org:<id>" for
+    # an account an organisation's SCIM/SAML provisioned.
+    identity_source: str = "local"
 
 
 class AuthConfigResponse(BaseModel):
@@ -225,6 +223,7 @@ def _user_dict(user: CurrentUser) -> dict:
     return {
         "id": user.id, "email": user.email, "role": user.role,
         "is_admin": user.is_admin, "name": user.name, "avatar_url": user.avatar_url,
+        "email_verified": user.email_verified, "identity_source": user.identity_source,
     }
 
 
@@ -403,6 +402,7 @@ async def register(body: RegisterRequest, request: Request) -> MessageResponse:
     # (link_supertokens_id below would). A row the allow-list step pre-made,
     # linked to nobody yet, can still register. (hivemind #502)
     existing = await get_user_by_email(email)
+    await refuse_if_org_managed(email)  # an org-provisioned address is never claimed by a local sign-up
     if existing is not None and existing.supertokens_user_id:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
 
@@ -445,6 +445,7 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
 
     st_user_id = result.user.id
     record = await get_user_by_email(email)
+    await refuse_if_org_managed(email)  # before any link is made or moved
 
     # 1. One email can belong to several SuperTokens users here (account linking
     #    is off), and the row is found by email. Only the sign-in user the row is
@@ -492,6 +493,8 @@ async def password_login(body: PasswordLoginRequest, request: Request) -> LoginR
     user = CurrentUser(
         id=record.id, email=record.email, role=role,
         name=record.name, avatar_url=record.avatar_url,
+        email_verified=bool(record.email_verified),
+        identity_source=identity_source_for(record.auth_provider, record.identity_source),
     )
     token, refresh_token = await _create_session(st_user_id)
     await _maybe_welcome_grant(record.id)
@@ -595,7 +598,11 @@ async def login(body: LoginRequest) -> LoginResponse:
         await link_supertokens_id(record.email, st_id)
         record = await get_user_by_email(record.email)
 
-    user = CurrentUser(id=record.id, email=record.email, role=record.role)
+    user = CurrentUser(
+        id=record.id, email=record.email, role=record.role,
+        email_verified=bool(record.email_verified),
+        identity_source=identity_source_for(record.auth_provider, record.identity_source),
+    )
     token, refresh_token = await _create_session(record.supertokens_user_id or record.id)
     await _maybe_welcome_grant(record.id)
 
@@ -641,6 +648,8 @@ async def google_login(body: GoogleLoginRequest) -> LoginResponse:
     user = CurrentUser(
         id=record.id, email=record.email, role=record.role,
         name=record.name, avatar_url=record.avatar_url,
+        email_verified=bool(record.email_verified),
+        identity_source=identity_source_for(record.auth_provider, record.identity_source),
     )
     token, refresh_token = await _create_session(st_user_id)
     await _maybe_welcome_grant(record.id)
@@ -749,6 +758,7 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
             detail="Your sign-in provider has not verified this email address. Verify it there, then try again.",
         )
     await _check_invite(email)
+    await refuse_if_org_managed(email)  # before a SuperTokens third-party user is made for it
 
     st_result = await manually_create_or_update_user(
         tenant_id="public",
@@ -772,6 +782,8 @@ async def oauth_login(body: OAuthLoginRequest) -> LoginResponse:
     user = CurrentUser(
         id=record.id, email=record.email, role=record.role,
         name=record.name, avatar_url=record.avatar_url,
+        email_verified=bool(record.email_verified),
+        identity_source=identity_source_for(record.auth_provider, record.identity_source),
     )
     token, refresh_token = await _create_session(st_result.user.id)
     await _maybe_welcome_grant(record.id)
@@ -934,6 +946,8 @@ async def me(user: CurrentUser = Depends(get_current_user)) -> UserResponse:
         name=user.name,
         avatar_url=user.avatar_url,
         apps=apps,
+        email_verified=user.email_verified,
+        identity_source=user.identity_source,
     )
 
 

@@ -38,10 +38,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import audit
 from core.auth.config import get_api_domain
-from core.auth.models import UserRecord
+from core.auth.models import CurrentUser, UserRecord, org_identity_source
 from core.auth.orgs import service as orgs
 from core.auth.orgs.models import Org, OrgGroup, OrgGroupMember, OrgMember
 from core.auth.saml.models import SamlIdentity
+from core.auth.saml.service import SamlError, bind_identity
 from core.auth.scim import schemas
 from core.auth.scim.models import OrgScimToken
 from core.auth.scim.schemas import DEFAULT_PAGE, MAX_PAGE, ScimError
@@ -49,6 +50,7 @@ from core.database.session import get_session
 
 KIND_AUTH = "scim.auth"
 KIND_TOKEN = "scim.token"
+KIND_USER = "scim.user"
 
 _FILTER_RE = re.compile(r'^\s*([A-Za-z][\w.]*)\s+(eq)\s+"((?:[^"\\]|\\.)*)"\s*$', re.I)
 _PATH_RE = re.compile(r'^([A-Za-z][\w]*)(?:\[\s*([A-Za-z][\w.]*)\s+eq\s+"((?:[^"\\]|\\.)*)"\s*\])?(?:\.([A-Za-z][\w]*))?$')
@@ -65,10 +67,11 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-async def mint_token(org_id: str, actor_user_id: str) -> dict[str, Any]:
-    """A fresh token for the org (owner/admin only); any earlier one is revoked."""
+async def mint_token(org_id: str, actor: CurrentUser) -> dict[str, Any]:
+    """A fresh token for the org (owner only: whoever holds it provisions
+    accounts the org's IdP can sign in); any earlier one is revoked."""
     async with get_session() as session:
-        await orgs._require_membership(session, org_id, actor_user_id, orgs.MANAGER_ROLES)
+        await orgs._require_membership(session, org_id, actor, orgs.OWNER_ONLY)
         now = datetime.now(timezone.utc)
         live = (await session.scalars(
             select(OrgScimToken).where(OrgScimToken.org_id == org_id, OrgScimToken.revoked_at.is_(None))
@@ -80,13 +83,13 @@ async def mint_token(org_id: str, actor_user_id: str) -> dict[str, Any]:
         session.add(row)
         await session.flush()
         created_at = row.created_at or now
-    await audit.record(KIND_TOKEN, "ok", org_id=org_id, subject=actor_user_id, detail=f"minted {token[:8]}")
+    await audit.record(KIND_TOKEN, "ok", org_id=org_id, subject=actor.id, detail=f"minted {token[:8]}")
     return {"token": token, "prefix": token[:8], "scim_base_url": base_url(), "created_at": created_at}
 
 
-async def token_status(org_id: str, actor_user_id: str) -> dict[str, Any]:
+async def token_status(org_id: str, actor: CurrentUser) -> dict[str, Any]:
     async with get_session() as session:
-        await orgs._require_membership(session, org_id, actor_user_id, orgs.MANAGER_ROLES)
+        await orgs._require_membership(session, org_id, actor, orgs.MANAGER_ROLES)
         row = await session.scalar(
             select(OrgScimToken).where(OrgScimToken.org_id == org_id, OrgScimToken.revoked_at.is_(None))
         )
@@ -99,15 +102,15 @@ async def token_status(org_id: str, actor_user_id: str) -> dict[str, Any]:
         }
 
 
-async def revoke_token(org_id: str, actor_user_id: str) -> None:
+async def revoke_token(org_id: str, actor: CurrentUser) -> None:
     async with get_session() as session:
-        await orgs._require_membership(session, org_id, actor_user_id, orgs.MANAGER_ROLES)
+        await orgs._require_membership(session, org_id, actor, orgs.OWNER_ONLY)
         now = datetime.now(timezone.utc)
         for row in (await session.scalars(
             select(OrgScimToken).where(OrgScimToken.org_id == org_id, OrgScimToken.revoked_at.is_(None))
         )).all():
             row.revoked_at = now
-    await audit.record(KIND_TOKEN, "ok", org_id=org_id, subject=actor_user_id, detail="revoked")
+    await audit.record(KIND_TOKEN, "ok", org_id=org_id, subject=actor.id, detail="revoked")
 
 
 async def org_for_token(token: str) -> Org | None:
@@ -320,24 +323,15 @@ def _formatted(display_name: str | None, name: dict[str, Any]) -> str | None:
 
 
 async def _owned_by_org(session: AsyncSession, org: Org, user: UserRecord) -> bool:
-    """Was this account made by this org's provisioning (so its identity is the org's to edit)?"""
-    if user.auth_provider not in ("scim", "saml"):
-        return False
-    row = await session.scalar(
-        select(SamlIdentity.id).where(SamlIdentity.org_id == org.id, SamlIdentity.user_id == user.id)
-    )
-    return row is not None
+    """Is this org the account's authority (users.identity_source == "org:<id>")?"""
+    return user.identity_source == org_identity_source(org.id)
 
 
 async def _bind(session: AsyncSession, org: Org, user: UserRecord, keys: list[str | None]) -> None:
-    for key in {k for k in keys if k}:
-        exists = await session.scalar(
-            select(SamlIdentity).where(SamlIdentity.org_id == org.id, SamlIdentity.name_id == key)
-        )
-        if exists is None:
-            session.add(SamlIdentity(org_id=org.id, name_id=key, user_id=user.id))
-        elif exists.user_id != user.id:
-            raise ScimError(409, f"{key} already identifies another user in this organisation", "uniqueness")
+    try:
+        await bind_identity(session, org, user, keys)
+    except SamlError as exc:
+        raise ScimError(409, str(exc.detail), "uniqueness")
 
 
 async def _check_external_id(session: AsyncSession, org: Org, external_id: str | None, user_id: str) -> None:
@@ -370,9 +364,19 @@ async def create_user(org: Org, body: dict[str, Any]) -> dict[str, Any]:
                 id=str(uuid.uuid4()), email=desired["email"],
                 name=_formatted(desired["displayName"], desired["name"]),
                 auth_provider="scim", role="user", email_verified=False,
+                identity_source=org_identity_source(org.id),
             )
             session.add(user)
             await session.flush()
+        elif not await _owned_by_org(session, org, user):
+            # the address already has an account whose authority is not this
+            # org (local, Google, or another org's): never provisioned over,
+            # never linked. 409 + audit; the verified link flow is out of scope.
+            await audit.record(
+                KIND_USER, "refused", org_id=org.id, subject=desired["email"],
+                detail="create refused: the email belongs to an account not managed by this organisation",
+            )
+            raise ScimError(409, f"{desired['email']} already belongs to an account outside this organisation", "uniqueness")
         elif await orgs._get_membership(session, org.id, user.id, include_inactive=True) is not None:
             raise ScimError(409, f"userName {desired['userName']} already exists", "uniqueness")
         membership = await orgs._add_membership(session, org.id, user.id, "member")
@@ -599,8 +603,8 @@ async def _set_members(session: AsyncSession, org: Org, g: OrgGroup, add: list[s
     if replace:
         await session.execute(delete(OrgGroupMember).where(OrgGroupMember.group_id == g.id))
     for uid in add:
-        if await orgs._get_membership(session, org.id, uid, include_inactive=True) is None:
-            raise ScimError(400, f"User {uid} is not a member of this organisation", "invalidValue")
+        if await orgs._get_membership(session, org.id, uid) is None:  # inactive counts as not a member
+            raise ScimError(400, f"User {uid} is not an active member of this organisation", "invalidValue")
         await orgs._add_group_member(session, g, uid)
     for uid in remove:
         await orgs._remove_group_member(session, g, uid)

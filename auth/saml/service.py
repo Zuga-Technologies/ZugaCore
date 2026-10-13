@@ -2,36 +2,46 @@
 
 The ACS (`consume`) is the security boundary. In order:
 
-1. The org exists and has SSO configured and enabled, else 404.
-2. python3-saml validates the response in strict mode: signature of the
-   assertion against the org's IdP certificate (SHA-1 refused unless the
-   org opted in), issuer, audience (our entity id), Destination and
-   Recipient (our ACS URL, built from API_DOMAIN), NotBefore/NotOnOrAfter
-   on the conditions and the subject confirmation, and that a NameID is
-   present. Any failure: an audit row with the library's reason, then 401.
-3. Replay: the assertion id is inserted into saml_assertion; a duplicate is
+1. The org exists and has SSO configured and enabled, else 404. The caller's
+   IP is rate-limited (core.auth.ratelimit) before any signature work.
+2. InResponseTo. An SP-initiated flow starts at `/login`, which stores the
+   AuthnRequest id (saml_request, ten-minute expiry). A response that names
+   a request id is accepted only if that id is stored, unexpired and unused;
+   it is consumed on first use, so a second response for the same request
+   is refused. A response with no InResponseTo is IdP-initiated: refused
+   unless the org set `saml.allow_idp_initiated` (off by default; login
+   CSRF is the attack it opens), and audited either way.
+3. python3-saml validates the response in strict mode, with the request id
+   passed in so it checks the match too: signature of the assertion against
+   the org's IdP certificate (SHA-1 refused unless the org opted in),
+   issuer, audience (our entity id), Destination and Recipient (our ACS
+   URL, built from API_DOMAIN), NotBefore/NotOnOrAfter on the conditions and
+   the subject confirmation, and that a NameID is present. Any failure: an
+   audit row with the library's reason, then 401.
+4. Replay: the assertion id is inserted into saml_assertion; a duplicate is
    an audit row and 401.
-4. Who is this? The subject is resolved through saml_identity, keyed by
-   NameID (or, for accounts SCIM created, by the email it was created
-   with); see core.auth.saml.models for why only a binding or a brand-new
-   email may sign in, never an existing unbound account (403 + audit).
-5. Just-in-time provisioning: a new users row (role "user", provider
-   "saml", email verified by the IdP), org membership as "member", and the
-   binding. Display name, groups and roles from the attribute statement
-   are applied on every login: groups become org_group rows and, when the
-   IdP sends the attribute at all, are the user's complete group list for
-   that org; roles and display name are kept on org_member.sso_attributes
-   for the consumer (Officium maps them to sys_user_role).
-6. A session is minted (SuperTokens third-party user "saml-<org slug>",
-   see _mint_session) and handed to the browser the way desktop sign-in
-   already does it: a single-use 120-second handoff code in the redirect,
-   redeemed at POST /api/auth/session/for-desktop/exchange. The tokens
-   themselves never appear in a URL.
-
-IdP-initiated sign-in is accepted (no InResponseTo pinning); the replay
-guard and the short validity windows IdPs put on assertions bound the
-exposure. Pinning needs browser state across the redirect and is a
-follow-up noted in the lane report.
+5. Who is this? Through saml_identity, keyed by NameID (or, for accounts
+   SCIM created, by the email/externalId it was created with). The bound
+   account must still carry this org's authority: users.identity_source ==
+   "org:<this org's id>". An account whose authority is not this org (it
+   belongs to another org, or it is a local / Google / password account) is
+   refused, 403 + audit, whatever the binding says: an org's IdP can mint
+   sessions only for accounts that org provisioned. An unbound email that
+   already has an account is refused the same way. No automatic linking in
+   either direction (the verified link flow is out of scope).
+6. Just-in-time provisioning for an unknown email: a new users row (role
+   "user", provider "saml", identity_source "org:<id>", email verified by
+   the IdP), org membership as "member", and the binding. Display name,
+   groups and roles from the attribute statement are applied on every
+   login: groups become org_group rows and, when the IdP sends the
+   attribute at all, are the user's complete group list for that org;
+   roles and display name are kept on org_member.sso_attributes for the
+   consumer (Officium maps them to sys_user_role).
+7. A session is minted (SuperTokens third-party user "saml-<org slug>",
+   see _mint_session; a failure here is audited) and handed to the browser
+   the way desktop sign-in already does it: a single-use 120-second handoff
+   code in the redirect, redeemed at POST /api/auth/session/for-desktop/exchange.
+   The tokens themselves never appear in a URL.
 """
 
 import logging
@@ -46,17 +56,25 @@ from sqlalchemy.exc import IntegrityError
 
 from core.auth import audit
 from core.auth.desktop_handoff import store_code
-from core.auth.models import UserRecord
+from core.auth.models import UserRecord, org_identity_source
 from core.auth.orgs import service as orgs
-from core.auth.orgs.models import Org, OrgGroup, OrgGroupMember, OrgMember
+from core.auth.orgs.models import Org, OrgGroup, OrgGroupMember
+from core.auth.ratelimit import check_rate_limit
 from core.auth.saml import config as cfg
-from core.auth.saml.models import SamlAssertion, SamlIdentity
+from core.auth.saml.models import SamlAssertion, SamlIdentity, SamlRequest
 from core.database.session import get_session
 
 logger = logging.getLogger(__name__)
 
 KIND_ACS = "saml.acs"
 _ASSERTION_ROW_MAX_AGE = timedelta(days=1)
+REQUEST_TTL = timedelta(minutes=10)
+ACS_RATE_PER_MINUTE = 30
+
+NOT_THIS_ORGS_ACCOUNT = (
+    "This account is not managed by this organisation's single sign-on. Sign in the way you did "
+    "before, or ask your administrator to provision the account through SCIM."
+)
 
 
 class SamlError(HTTPException):
@@ -97,11 +115,38 @@ async def metadata_xml(org_slug: str) -> str:
     return xml.decode() if isinstance(xml, bytes) else xml
 
 
+async def _remember_request(org: Org, request_id: str) -> None:
+    async with get_session() as session:
+        now = datetime.now(timezone.utc)
+        await session.execute(delete(SamlRequest).where(SamlRequest.expires_at < now))
+        session.add(SamlRequest(org_id=org.id, request_id=request_id, expires_at=now + REQUEST_TTL))
+
+
+async def _consume_request(org: Org, request_id: str) -> bool:
+    """True once, for a stored, unexpired request id of this org; the row is removed."""
+    async with get_session() as session:
+        row = await session.scalar(
+            select(SamlRequest).where(SamlRequest.org_id == org.id, SamlRequest.request_id == request_id)
+        )
+        if row is None:
+            return False
+        live = row.expires_at.replace(tzinfo=timezone.utc) if row.expires_at.tzinfo is None else row.expires_at
+        await session.delete(row)
+        return live > datetime.now(timezone.utc)
+
+
 async def login_redirect(org_slug: str, next_path: str | None = None) -> str:
-    """The IdP URL (HTTP-Redirect binding) carrying a fresh AuthnRequest."""
+    """The IdP URL (HTTP-Redirect binding) carrying a fresh AuthnRequest,
+    whose id is remembered so the response can be pinned to it."""
     org, saml = await _org_with_sso(org_slug)
     relay = cfg.safe_relay_path(next_path)
-    return _auth(org.slug, saml).login(return_to=relay) if relay else _auth(org.slug, saml).login()
+    auth = _auth(org.slug, saml)
+    url = auth.login(return_to=relay) if relay else auth.login()
+    request_id = auth.get_last_request_id()
+    if not request_id:
+        raise SamlError(status_code=500, detail="Could not build the sign-on request")
+    await _remember_request(org, request_id)
+    return url
 
 
 # ── assertion consumer ──────────────────────────────────────────────────
@@ -149,43 +194,45 @@ async def _remember_assertion(org: Org, assertion_id: str, expires_at: datetime)
 
 
 async def _resolve_user(session, org: Org, name_id: str, email: str) -> UserRecord | None:
-    """The bound account for this subject, or None when the subject is new.
-
-    Raises 403 when the email belongs to an account this org's IdP has no
-    binding for (an existing account is never claimed by assertion).
-    """
+    """The account this org's IdP may sign in for this subject, or None when
+    the subject is new (an email nobody has). Everything else is 403."""
     binding = await session.scalar(
-        select(SamlIdentity).where(SamlIdentity.org_id == org.id, SamlIdentity.name_id.in_([name_id, email]))
+        select(SamlIdentity)
+        .where(SamlIdentity.org_id == org.id, SamlIdentity.name_id.in_([name_id, email]))
+        .order_by(SamlIdentity.id)
     )
     if binding is not None:
         user = await session.scalar(select(UserRecord).where(UserRecord.id == binding.user_id))
         if user is None:  # account deleted under the binding
             await session.delete(binding)
-            return None
-        return user
+        elif user.identity_source != org_identity_source(org.id):
+            # the account's authority is not this org any more (or never was):
+            # a binding alone never lets an IdP mint a session for it
+            raise SamlError(status_code=403, detail=NOT_THIS_ORGS_ACCOUNT)
+        else:
+            return user
     existing = await session.scalar(select(UserRecord).where(UserRecord.email == email))
     if existing is not None:
-        raise SamlError(
-            status_code=403,
-            detail=(
-                "An account with this email already exists and is not linked to this organisation's "
-                "single sign-on. Sign in the way you did before, or ask your administrator to provision "
-                "the account through SCIM."
-            ),
-        )
+        raise SamlError(status_code=403, detail=NOT_THIS_ORGS_ACCOUNT)
     return None
 
 
-async def _bind(session, org: Org, name_id: str, email: str, user: UserRecord) -> None:
+async def bind_identity(session, org: Org, user: UserRecord, keys: list[str | None], *, touch: bool = False) -> None:
+    """Bind each key (NameID, email, externalId) of this org's IdP to `user`.
+
+    A key already bound to a DIFFERENT account is a conflict (403): a binding
+    is never moved from one account to another. Shared by SAML and SCIM.
+    """
     now = datetime.now(timezone.utc)
-    for key in {name_id, email}:
+    for key in {k for k in keys if k}:
         row = await session.scalar(
             select(SamlIdentity).where(SamlIdentity.org_id == org.id, SamlIdentity.name_id == key)
         )
         if row is None:
-            session.add(SamlIdentity(org_id=org.id, name_id=key, user_id=user.id, last_login_at=now))
-        else:
-            row.user_id = user.id
+            session.add(SamlIdentity(org_id=org.id, name_id=key, user_id=user.id, last_login_at=now if touch else None))
+        elif row.user_id != user.id:
+            raise SamlError(status_code=403, detail=f"{key} already identifies another account in this organisation")
+        elif touch:
             row.last_login_at = now
 
 
@@ -240,21 +287,43 @@ async def _mint_session(user: UserRecord, org: Org, name_id: str) -> tuple[str, 
         if not isinstance(result, ManuallyCreateOrUpdateUserOkResult):
             raise SamlError(status_code=502, detail="Could not create the sign-in user")
         st_user_id = result.user.id
-        await link_supertokens_id(user.email, st_user_id)
+        await link_supertokens_id(user.email, st_user_id, allow_org_managed=True)
     return await _create_session(st_user_id)
+
+
+def _in_response_to(auth, response_b64: str) -> str | None:
+    """The response's InResponseTo, read before validation (None = unsolicited)."""
+    from onelogin.saml2.response import OneLogin_Saml2_Response
+
+    return OneLogin_Saml2_Response(auth.get_settings(), response_b64).get_in_response_to() or None
 
 
 async def consume(org_slug: str, post_data: dict[str, Any], ip: str | None = None) -> str:
     """Validate a SAMLResponse for the org; returns the URL to send the browser to."""
     org, saml = await _org_with_sso(org_slug)
+    check_rate_limit(f"saml-acs:{ip or 'unknown'}", ACS_RATE_PER_MINUTE, 60)
     if "SAMLResponse" not in post_data:
         raise SamlError(status_code=400, detail="SAMLResponse is missing")
 
     auth = _auth(org.slug, saml, post_data)
     try:
-        auth.process_response()
-        errors = auth.get_errors()
+        request_id = _in_response_to(auth, post_data["SAMLResponse"])
     except Exception as exc:  # malformed base64/XML and friends
+        raise await _refuse(401, org, None, f"{type(exc).__name__}: {exc}", ip, "Single sign-on response rejected")
+
+    idp_initiated = request_id is None
+    if idp_initiated:
+        if not cfg.allows_idp_initiated(saml):
+            raise await _refuse(401, org, None, "unsolicited (IdP-initiated) response refused: saml.allow_idp_initiated is off",
+                                ip, "Single sign-on must start from this application")
+    elif not await _consume_request(org, request_id):
+        raise await _refuse(401, org, None, f"unknown, expired or already used InResponseTo {request_id}", ip,
+                            "Single sign-on response rejected")
+
+    try:
+        auth.process_response(request_id=request_id)
+        errors = auth.get_errors()
+    except Exception as exc:
         errors = [type(exc).__name__]
         auth_reason = str(exc)
     else:
@@ -297,6 +366,7 @@ async def consume(org_slug: str, post_data: dict[str, Any], ip: str | None = Non
                 user = UserRecord(
                     id=str(uuid.uuid4()), email=email, name=display_name,
                     auth_provider="saml", role="user", email_verified=True,
+                    identity_source=org_identity_source(org.id),
                 )
                 session.add(user)
                 await session.flush()
@@ -310,15 +380,22 @@ async def consume(org_slug: str, post_data: dict[str, Any], ip: str | None = Non
                     raise SamlError(status_code=403, detail="You are no longer a member of this organisation")
                 membership = await orgs._add_membership(session, org.id, user.id, "member")
             membership.sso_attributes = {"display_name": display_name, "groups": groups, "roles": roles}
-            await _bind(session, org, name_id, email, user)
+            await bind_identity(session, org, user, [name_id, email], touch=True)
             if groups is not None:
                 await _sync_groups(session, org, user, groups)
     except SamlError as exc:
         raise await _refuse(exc.status_code, org, name_id, str(exc.detail), ip, str(exc.detail))
 
-    token, refresh_token = await _mint_session(user, org, name_id)
-    await audit.record(KIND_ACS, "ok", org_id=org.id, subject=email,
-                       detail="account created" if created else "signed in", ip=ip)
+    try:
+        token, refresh_token = await _mint_session(user, org, name_id)
+    except Exception as exc:
+        await audit.record(KIND_ACS, "refused", org_id=org.id, subject=email,
+                           detail=f"session could not be minted: {type(exc).__name__}: {exc}", ip=ip)
+        raise
+    how = "account created" if created else "signed in"
+    if idp_initiated:
+        how += " (IdP-initiated, allowed by saml.allow_idp_initiated)"
+    await audit.record(KIND_ACS, "ok", org_id=org.id, subject=email, detail=how, ip=ip)
 
     code, _ = store_code(token, refresh_token)
     params = {"code": code, "org": org.slug}

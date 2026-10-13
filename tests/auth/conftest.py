@@ -94,12 +94,12 @@ def enterprise_app_factory(db, monkeypatch):
     is NOT set here: `enterprise_app` sets it, and the flag-off tests build an
     app through this factory with it unset.
 
-    Auth is faked at the token->user seam, not by a token: the X-Test-User
+    Auth is faked at the dependency seam, not by a token: the X-Test-User
     header names the users.id the request runs as (the row must exist) and
-    X-Test-Session the session handle (default "sess-<user>"). That replaces
-    get_current_user_pre_mfa only, so the real get_current_user, and so the
-    real MFA gate, runs on top of it. SuperTokens stays out of these tests
-    the way test_closed_doors keeps it out.
+    X-Test-Session the session handle (default "sess-<user>"). The per-org
+    MFA gate lives in the org service, not in the dependency, so it runs
+    unchanged. SuperTokens stays out of these tests the way
+    test_closed_doors keeps it out.
     """
 
     def _make():
@@ -133,13 +133,7 @@ def enterprise_app_factory(db, monkeypatch):
                 session_id=request.headers.get("X-Test-Session") or f"sess-{uid}",
             )
 
-        # routes that Depends(get_current_user_pre_mfa) directly (the MFA routes)
-        app.dependency_overrides[middleware.get_current_user_pre_mfa] = fake_user
-        # get_current_user calls it by name, so the gate sees the same fake user.
-        # The real function is kept on the fake for tests that need the real path.
-        current = middleware.get_current_user_pre_mfa
-        fake_user.original = getattr(current, "original", current)
-        monkeypatch.setattr(middleware, "get_current_user_pre_mfa", fake_user)
+        app.dependency_overrides[middleware.get_current_user] = fake_user
         return app
 
     return _make
@@ -147,8 +141,21 @@ def enterprise_app_factory(db, monkeypatch):
 
 @pytest.fixture
 def enterprise_app(enterprise_app_factory, monkeypatch):
+    from cryptography.fernet import Fernet
+
     monkeypatch.setenv("ZUGACORE_ENTERPRISE", "1")
+    monkeypatch.setenv("ZUGACORE_MFA_KEY", Fernet.generate_key().decode())  # fresh per test, never stored
     return enterprise_app_factory()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_buckets():
+    """The shared in-memory limiter is process-wide; each test starts clean."""
+    from core.auth.ratelimit import _clear_for_tests
+
+    _clear_for_tests()
+    yield
+    _clear_for_tests()
 
 
 @pytest.fixture

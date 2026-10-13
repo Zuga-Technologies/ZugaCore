@@ -2,8 +2,7 @@ import logging
 
 from fastapi import Depends, HTTPException, Request
 
-from core.auth.config import get_enterprise_enabled
-from core.auth.models import CurrentUser
+from core.auth.models import CurrentUser, identity_source_for
 
 logger = logging.getLogger(__name__)
 
@@ -29,24 +28,11 @@ async def get_current_user(request: Request) -> CurrentUser:
     This is used as a FastAPI dependency. Any route that needs
     authentication adds: user: CurrentUser = Depends(get_current_user)
 
-    With ZUGACORE_ENTERPRISE=1 this also applies the per-org MFA gate: a user
-    who belongs to an org with settings.mfa_required and whose session has
-    not verified a code gets 403 {"code": "mfa_required"}. With the flag off
-    (the default) the gate is never imported and the old path runs exactly.
-    """
-    user = await get_current_user_pre_mfa(request)
-    if get_enterprise_enabled():
-        from core.auth.mfa.service import enforce
-
-        await enforce(user)
-    return user
-
-
-async def get_current_user_pre_mfa(request: Request) -> CurrentUser:
-    """get_current_user WITHOUT the enterprise MFA gate.
-
-    Only for the routes a gated user must still reach to pass the gate
-    (core.auth.mfa.router). Everything else uses get_current_user.
+    Enterprise note: the per-org MFA requirement (settings.mfa_required) is
+    NOT applied here. It is applied where an org is actually addressed, in
+    core.auth.orgs.service._require_membership, so one org's setting can
+    only ever gate that org's own routes. A consumer that serves org-scoped
+    resources of its own calls core.auth.mfa.service.gate_for_org.
     """
     local = _local_mode_user()
     if local is not None:
@@ -98,15 +84,7 @@ async def get_current_user_optional(request: Request) -> CurrentUser | None:
         return None
 
     token = auth_header.removeprefix("Bearer ")
-    user = await _validate_token(token)
-    if user is not None and get_enterprise_enabled():
-        # A gated user is anonymous here, never an error: this dependency
-        # promises to fail safe, and the lowest privilege is "nobody".
-        from core.auth.mfa.service import passes
-
-        if not await passes(user):
-            return None
-    return user
+    return await _validate_token(token)
 
 
 async def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
@@ -173,6 +151,8 @@ async def _validate_token(token: str) -> CurrentUser | None:
             name=record.name,
             avatar_url=record.avatar_url,
             session_id=session_id,
+            email_verified=bool(record.email_verified),
+            identity_source=identity_source_for(record.auth_provider, record.identity_source),
         )
 
     except Exception as e:

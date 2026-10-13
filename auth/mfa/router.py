@@ -6,20 +6,19 @@
     POST /api/auth/mfa/disable          {code}  turn MFA off
     POST /api/auth/mfa/recovery-codes   {code}  replace the recovery codes
 
-Every route here depends on get_current_user_pre_mfa, the signed-in user
-WITHOUT the MFA gate: these are the only routes a gated user must still reach,
-or nobody could ever pass the gate. Every other route in the platform keeps
-get_current_user. The rules (what counts as a valid code, throttling, why a
-recovery code is useless before the authenticator is confirmed) live in
+These routes are addressed to no org, so the per-org MFA requirement never
+applies to them: a person who must verify can always reach them. The rules
+(what counts as a valid code, throttling, why a recovery code is useless
+before the authenticator is confirmed, the encrypted secret) live in
 core.auth.mfa.service.
 """
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 
 from core.auth.enterprise import require_enterprise
 from core.auth.mfa import service
-from core.auth.middleware import get_current_user_pre_mfa
+from core.auth.middleware import get_current_user
 from core.auth.models import CurrentUser
 
 router = APIRouter(
@@ -57,29 +56,33 @@ class RecoveryCodesResponse(BaseModel):
     recovery_codes: list[str]
 
 
+def _ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
+
 @router.get("/status", response_model=StatusResponse)
-async def mfa_status(user: CurrentUser = Depends(get_current_user_pre_mfa)) -> StatusResponse:
+async def mfa_status(user: CurrentUser = Depends(get_current_user)) -> StatusResponse:
     return StatusResponse(**await service.status(user))
 
 
 @router.post("/enrol", response_model=EnrolResponse)
-async def mfa_enrol(user: CurrentUser = Depends(get_current_user_pre_mfa)) -> EnrolResponse:
+async def mfa_enrol(user: CurrentUser = Depends(get_current_user)) -> EnrolResponse:
     return EnrolResponse(**await service.enrol(user))
 
 
 @router.post("/verify", response_model=VerifyResponse)
-async def mfa_verify(body: CodeBody, user: CurrentUser = Depends(get_current_user_pre_mfa)) -> VerifyResponse:
-    return VerifyResponse(**await service.verify(user, body.code))
+async def mfa_verify(body: CodeBody, request: Request, user: CurrentUser = Depends(get_current_user)) -> VerifyResponse:
+    return VerifyResponse(**await service.verify(user, body.code, _ip(request)))
 
 
 @router.post("/disable", status_code=204, response_class=Response)
-async def mfa_disable(body: CodeBody, user: CurrentUser = Depends(get_current_user_pre_mfa)) -> Response:
-    await service.disable(user, body.code)
+async def mfa_disable(body: CodeBody, request: Request, user: CurrentUser = Depends(get_current_user)) -> Response:
+    await service.disable(user, body.code, _ip(request))
     return Response(status_code=204)
 
 
 @router.post("/recovery-codes", response_model=RecoveryCodesResponse)
 async def mfa_recovery_codes(
-    body: CodeBody, user: CurrentUser = Depends(get_current_user_pre_mfa)
+    body: CodeBody, request: Request, user: CurrentUser = Depends(get_current_user)
 ) -> RecoveryCodesResponse:
-    return RecoveryCodesResponse(recovery_codes=await service.regenerate_recovery_codes(user, body.code))
+    return RecoveryCodesResponse(recovery_codes=await service.regenerate_recovery_codes(user, body.code, _ip(request)))
