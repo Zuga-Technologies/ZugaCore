@@ -16,6 +16,10 @@ class CurrentUser:
     role: str = "user"
     name: str | None = None
     avatar_url: str | None = None
+    # The SuperTokens session handle this user arrived with, when known. The
+    # enterprise MFA gate keys "has this session passed MFA" on it. None for
+    # users built outside _validate_token (LOCAL_MODE, login responses).
+    session_id: str | None = None
 
     @property
     def is_admin(self) -> bool:

@@ -2,9 +2,25 @@ import logging
 
 from fastapi import Depends, HTTPException, Request
 
+from core.auth.config import get_enterprise_enabled
 from core.auth.models import CurrentUser
 
 logger = logging.getLogger(__name__)
+
+
+def _local_mode_user() -> CurrentUser | None:
+    """LOCAL_MODE's auto-signed-in desktop user, or None when it is off.
+
+    core.local_mode is provided by the consumer (ZugaPlatform's desktop build);
+    a consumer without that module simply has no local mode, so tokens are
+    validated as usual. Before this guard such a consumer answered every
+    authenticated request with a 500 (ModuleNotFoundError).
+    """
+    try:
+        from core.local_mode import LOCAL_MODE, local_user
+    except ImportError:
+        return None
+    return local_user() if LOCAL_MODE else None
 
 
 async def get_current_user(request: Request) -> CurrentUser:
@@ -12,10 +28,29 @@ async def get_current_user(request: Request) -> CurrentUser:
 
     This is used as a FastAPI dependency. Any route that needs
     authentication adds: user: CurrentUser = Depends(get_current_user)
+
+    With ZUGACORE_ENTERPRISE=1 this also applies the per-org MFA gate: a user
+    who belongs to an org with settings.mfa_required and whose session has
+    not verified a code gets 403 {"code": "mfa_required"}. With the flag off
+    (the default) the gate is never imported and the old path runs exactly.
     """
-    from core.local_mode import LOCAL_MODE, local_user
-    if LOCAL_MODE:
-        return local_user()
+    user = await get_current_user_pre_mfa(request)
+    if get_enterprise_enabled():
+        from core.auth.mfa.service import enforce
+
+        await enforce(user)
+    return user
+
+
+async def get_current_user_pre_mfa(request: Request) -> CurrentUser:
+    """get_current_user WITHOUT the enterprise MFA gate.
+
+    Only for the routes a gated user must still reach to pass the gate
+    (core.auth.mfa.router). Everything else uses get_current_user.
+    """
+    local = _local_mode_user()
+    if local is not None:
+        return local
 
     auth_header = request.headers.get("Authorization")
 
@@ -47,9 +82,9 @@ async def get_current_user_optional(request: Request) -> CurrentUser | None:
     Never grants elevated privilege on None — the caller is responsible for
     failing safe (treat None as the lowest privilege level).
     """
-    from core.local_mode import LOCAL_MODE, local_user
-    if LOCAL_MODE:
-        return local_user()
+    local = _local_mode_user()
+    if local is not None:
+        return local
 
     auth_header = request.headers.get("Authorization")
 
@@ -63,7 +98,15 @@ async def get_current_user_optional(request: Request) -> CurrentUser | None:
         return None
 
     token = auth_header.removeprefix("Bearer ")
-    return await _validate_token(token)
+    user = await _validate_token(token)
+    if user is not None and get_enterprise_enabled():
+        # A gated user is anonymous here, never an error: this dependency
+        # promises to fail safe, and the lowest privilege is "nobody".
+        from core.auth.mfa.service import passes
+
+        if not await passes(user):
+            return None
+    return user
 
 
 async def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
@@ -118,12 +161,18 @@ async def _validate_token(token: str) -> CurrentUser | None:
         # proven they own it, and SuperTokens' built-in sign-in skips the app's
         # verify-your-email check.
         role = record.role if record.email_verified else "user"
+        # The session handle is what the enterprise MFA gate keys on. Optional:
+        # a session object without one (older SuperTokens, test doubles) just
+        # yields a user that cannot be MFA-verified, never a failed login.
+        get_handle = getattr(session, "get_handle", None)
+        session_id = get_handle() if callable(get_handle) else None
         return CurrentUser(
             id=record.id,
             email=record.email,
             role=role,
             name=record.name,
             avatar_url=record.avatar_url,
+            session_id=session_id,
         )
 
     except Exception as e:

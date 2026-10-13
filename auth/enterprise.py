@@ -34,6 +34,8 @@ def include_enterprise_routes(app: FastAPI) -> None:
     ZUGACORE_ENTERPRISE=1. Calling it does import the enterprise models, so a
     consumer that mounts the routes gets the tables created by init_db().
     """
+    from core.auth.mfa.router import router as mfa_router
     from core.auth.orgs.router import router as orgs_router
 
     app.include_router(orgs_router)
+    app.include_router(mfa_router)

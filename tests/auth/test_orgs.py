@@ -242,15 +242,16 @@ def test_settings_patch_merges_and_is_owner_or_admin_only(ent):
     oid = _create_org(ent)["id"]
     ent.post(f"/api/orgs/{oid}/members", json={"user_id": "u2"}, headers=_as("u1"))
 
-    r = ent.patch(f"/api/orgs/{oid}", json={"settings": {"mfa_required": True, "theme": "dark"}}, headers=_as("u1"))
-    assert r.status_code == 200 and r.json()["settings"] == {"mfa_required": True, "theme": "dark"}
+    # (mfa_required is exercised in test_mfa.py: setting it here would gate u1's next request)
+    r = ent.patch(f"/api/orgs/{oid}", json={"settings": {"theme": "dark", "locale": "en"}}, headers=_as("u1"))
+    assert r.status_code == 200 and r.json()["settings"] == {"theme": "dark", "locale": "en"}
     # shallow merge: untouched keys survive, null deletes a key
     r = ent.patch(f"/api/orgs/{oid}", json={"settings": {"theme": None}}, headers=_as("u1"))
-    assert r.json()["settings"] == {"mfa_required": True}
+    assert r.status_code == 200 and r.json()["settings"] == {"locale": "en"}
     # members do not get the settings blob back, and cannot write it
     assert ent.get(f"/api/orgs/{oid}", headers=_as("u2")).json()["settings"] == {}
-    assert ent.patch(f"/api/orgs/{oid}", json={"settings": {"mfa_required": False}}, headers=_as("u2")).status_code == 403
-    assert ent.get(f"/api/orgs/{oid}", headers=_as("u1")).json()["settings"] == {"mfa_required": True}
+    assert ent.patch(f"/api/orgs/{oid}", json={"settings": {"locale": "fr"}}, headers=_as("u2")).status_code == 403
+    assert ent.get(f"/api/orgs/{oid}", headers=_as("u1")).json()["settings"] == {"locale": "en"}
 
 
 @pytest.mark.parametrize("bad", [{"mfa_required": "yes"}, {"mfa_required": 1}, {"saml": "not-a-dict"}])
