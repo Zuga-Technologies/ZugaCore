@@ -30,7 +30,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from ._samlidp import API, IDP_ENTITY, IDP_SSO, SLUG, WEB, keypair, sp_initiated_response
+from ._samlidp import API, IDP_ENTITY, IDP_SSO, SLUG, WEB, keypair, sp_login
 
 VICTIM = "victim@gmail.com"
 
@@ -119,8 +119,7 @@ def test_reviewer_reproduction_fails_at_both_steps(ent, attacker, idp, db, monke
         return "access", "refresh"
 
     monkeypatch.setattr(auth_routes, "_create_session", fake_create_session)
-    r = ent.post(f"/api/auth/saml/{SLUG}/acs", follow_redirects=False,
-                 data={"SAMLResponse": sp_initiated_response(ent, idp, name_id="victim", attributes={"email": [VICTIM]})})
+    r = sp_login(ent, idp, name_id="victim", attributes={"email": [VICTIM]})
     assert r.status_code == 403, r.text
     assert minted == []
     rows = _audit(db, "saml.acs")
@@ -213,8 +212,7 @@ def test_saml_never_signs_in_a_local_or_foreign_account(ent, attacker, idp, db, 
 
     # a local account (u2), even once the owner has added it as a member by hand
     ent.post(f"/api/orgs/{attacker['org']['id']}/members", json={"user_id": "u2"}, headers=_as("u1"))
-    r = ent.post(f"/api/auth/saml/{SLUG}/acs", follow_redirects=False,
-                 data={"SAMLResponse": sp_initiated_response(ent, idp, name_id="u2", attributes={"email": ["u2@example.com"]})})
+    r = sp_login(ent, idp, name_id="u2", attributes={"email": ["u2@example.com"]})
     assert r.status_code == 403 and minted == []
     assert _audit(db, "saml.acs")[-1].outcome == "refused"
 
@@ -224,14 +222,12 @@ def test_saml_never_signs_in_a_local_or_foreign_account(ent, attacker, idp, db, 
     created = ent.post("/scim/v2/Users", headers={"Authorization": f"Bearer {rival_tok}"},
                        json={"userName": "shared@customer.example", "emails": [{"value": "shared@customer.example", "primary": True}]}).json()
     ent.post(f"/api/orgs/{attacker['org']['id']}/members", json={"user_id": created["id"]}, headers=_as("u1"))
-    r = ent.post(f"/api/auth/saml/{SLUG}/acs", follow_redirects=False,
-                 data={"SAMLResponse": sp_initiated_response(ent, idp, name_id="shared@customer.example", attributes={})})
+    r = sp_login(ent, idp, name_id="shared@customer.example", attributes={})
     assert r.status_code == 403 and minted == []
 
     # the org's OWN provisioned account still signs in
     _provision_victim(ent, attacker)
-    r = ent.post(f"/api/auth/saml/{SLUG}/acs", follow_redirects=False,
-                 data={"SAMLResponse": sp_initiated_response(ent, idp, name_id=VICTIM, attributes={})})
+    r = sp_login(ent, idp, name_id=VICTIM, attributes={})
     assert r.status_code == 303, r.text
     assert len(minted) == 1
 
@@ -242,12 +238,10 @@ def test_a_binding_is_never_moved_to_another_account(ent, attacker, idp, db, mon
     from core.auth.saml import service
 
     monkeypatch.setattr(service, "_mint_session", lambda u, o, n: _ok())
-    r = ent.post(f"/api/auth/saml/{SLUG}/acs", follow_redirects=False,
-                 data={"SAMLResponse": sp_initiated_response(ent, idp, name_id="jane-1", attributes={"email": ["jane@customer.example"]})})
+    r = sp_login(ent, idp, name_id="jane-1", attributes={"email": ["jane@customer.example"]})
     assert r.status_code == 303
     # a different subject claiming the same email: the email binding points at jane-1's account
-    r = ent.post(f"/api/auth/saml/{SLUG}/acs", follow_redirects=False,
-                 data={"SAMLResponse": sp_initiated_response(ent, idp, name_id="jane-2", attributes={"email": ["jane@customer.example"]})})
+    r = sp_login(ent, idp, name_id="jane-2", attributes={"email": ["jane@customer.example"]})
     # resolved through the email binding to the same (org-owned) account; the
     # new NameID is added as a second key, nothing is re-pointed
     assert r.status_code == 303, r.text

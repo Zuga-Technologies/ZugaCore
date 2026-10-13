@@ -2,7 +2,7 @@ import logging
 
 from fastapi import Depends, HTTPException, Request
 
-from core.auth.models import CurrentUser, identity_source_for
+from core.auth.models import CurrentUser, email_verified_for, identity_source_for
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ async def _validate_token(token: str) -> CurrentUser | None:
             name=record.name,
             avatar_url=record.avatar_url,
             session_id=session_id,
-            email_verified=bool(record.email_verified),
+            email_verified=email_verified_for(record.email_verified, record.identity_source),
             identity_source=identity_source_for(record.auth_provider, record.identity_source),
         )
 

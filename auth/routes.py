@@ -182,7 +182,9 @@ class UserResponse(BaseModel):
     # Apps this ZugaID owns — the portal embeds these (admin owns-all).
     apps: list[str] = []
     # Has the mailbox been proven (verification link, or a provider that
-    # asserts it)? Consumers adopt an unbound row by email only when true.
+    # asserts it)? Never true for an org-provisioned account (see
+    # core.auth.models.CurrentUser). Consumers adopt an unbound row by email
+    # only when true, and never adopt an org row by email at all.
     email_verified: bool = False
     # "local", "google" / "github" / "microsoft" / "apple", or "org:<id>" for
     # an account an organisation's SCIM/SAML provisioned.

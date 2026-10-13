@@ -17,6 +17,16 @@ def org_identity_source(org_id: str) -> str:
 VERIFIED_PROVIDERS: tuple[str, ...] = ("google", "github", "microsoft", "apple")
 
 
+def is_org_source(identity_source: str | None) -> bool:
+    return bool(identity_source) and identity_source.startswith("org:")
+
+
+def email_verified_for(email_verified: bool | None, identity_source: str | None) -> bool:
+    """What CurrentUser.email_verified says: the row's flag, except that an
+    org-provisioned account is never reported as verified (see CurrentUser)."""
+    return bool(email_verified) and not is_org_source(identity_source)
+
+
 def identity_source_for(auth_provider: str | None, stored: str | None = None) -> str:
     """What CurrentUser.identity_source says for a users row.
 
@@ -38,9 +48,21 @@ class CurrentUser:
     role: str = "user"
     name: str | None = None
     avatar_url: str | None = None
-    # Both additive, flag-independent. Officium binds sys_user rows to the
-    # ZugaCore user id and adopts an unbound row by email only when
-    # email_verified is true; identity_source says who owns the identity.
+    # Both additive, flag-independent.
+    #
+    # email_verified: the mailbox was proven, by the verification link or by a
+    # sign-in provider that asserts verified addresses (google, github,
+    # microsoft, apple). It is ALWAYS False for an org-provisioned account
+    # (identity_source "org:<id>"), whatever the users row says: an
+    # organisation's IdP or SCIM vouching for an address is not mailbox proof,
+    # because any signed-in user can create an org and point it at an IdP
+    # they run. A consumer that adopts an unbound row of its own by email
+    # (Officium's sys_user) may do so only when this is True; it must never
+    # adopt by email on the strength of an org row, and binds an org row only
+    # through that org's own mapping (its SCIM/SAML id), never by email.
+    #
+    # identity_source: "local", a provider name, or "org:<id>" for an account
+    # that org's SCIM/SAML provisioned (only that org's IdP can sign it in).
     email_verified: bool = False
     identity_source: str = "local"
     # The SuperTokens session handle this user arrived with, when known. The

@@ -4,6 +4,13 @@ An RSA key and self-signed certificate are generated in memory per call to
 `keypair()`; nothing is written to disk or committed. `saml_response()`
 builds a SAML Response with a signed Assertion the way a real IdP would, so
 the service provider's checks run against real XML signatures.
+
+`start_login()` plays the browser: it GETs /login and returns the request
+id the SP issued together with the request cookie the SP set, and
+`post_acs()` posts a response WITH that cookie, the way the browser that
+started the login would. The TestClient's own jar does not send a Secure
+cookie over its http:// base URL, so the cookie travels as an explicit
+header here.
 """
 import base64
 import re
@@ -19,6 +26,7 @@ IDP_SSO = "https://idp.test/sso"
 SLUG = "acme"
 ACS = f"{API}/api/auth/saml/{SLUG}/acs"
 SP_ENTITY = f"{API}/api/auth/saml/{SLUG}/metadata"
+REQUEST_COOKIE = "__Host-saml_request"
 
 
 def keypair() -> tuple[str, str]:
@@ -118,17 +126,46 @@ def saml_response(
     return base64.b64encode(response.encode()).decode()
 
 
-def start_login(ent, slug=SLUG, next_path=None) -> str:
-    """GET /login like a browser would and return the AuthnRequest id the SP issued."""
+def request_cookie(response) -> str:
+    """The value of the request cookie a /login response set."""
+    for raw in response.headers.get_list("set-cookie"):
+        name, _, rest = raw.partition("=")
+        if name.strip() == REQUEST_COOKIE:
+            return rest.split(";", 1)[0]
+    raise AssertionError("no request cookie on the /login response")
+
+
+def cookie_header(value: str) -> dict[str, str]:
+    return {"Cookie": f"{REQUEST_COOKIE}={value}"}
+
+
+def start_login(ent, slug=SLUG, next_path=None) -> tuple[str, str]:
+    """GET /login like a browser would; returns (AuthnRequest id, request cookie value)."""
     r = ent.get(f"/api/auth/saml/{slug}/login", params={"next": next_path} if next_path else None, follow_redirects=False)
     assert r.status_code == 302, r.text
     q = parse_qs(urlsplit(r.headers["location"]).query)
     xml = zlib.decompress(base64.b64decode(q["SAMLRequest"][0]), -15).decode()
     m = re.search(r'\bID="([^"]+)"', xml)
     assert m, xml
-    return m.group(1)
+    return m.group(1), request_cookie(r)
 
 
-def sp_initiated_response(ent, idp, slug=SLUG, **kwargs) -> str:
-    """A response that answers a request this SP just issued."""
-    return saml_response(idp, in_response_to=start_login(ent, slug), **kwargs)
+def sp_initiated_response(ent, idp, slug=SLUG, **kwargs) -> tuple[str, str]:
+    """(response answering a request this SP just issued, that browser's cookie)."""
+    request_id, cookie = start_login(ent, slug)
+    return saml_response(idp, in_response_to=request_id, **kwargs), cookie
+
+
+def post_acs(ent, response_b64: str, cookie: str | None = None, relay: str | None = None, slug=SLUG):
+    """POST a response to the ACS, with the request cookie when given."""
+    data = {"SAMLResponse": response_b64}
+    if relay is not None:
+        data["RelayState"] = relay
+    headers = cookie_header(cookie) if cookie else {}
+    return ent.post(f"/api/auth/saml/{slug}/acs", data=data, headers=headers, follow_redirects=False)
+
+
+def sp_login(ent, idp, slug=SLUG, relay: str | None = None, **kwargs):
+    """A whole SP-initiated sign-in from one browser."""
+    response_b64, cookie = sp_initiated_response(ent, idp, slug, **kwargs)
+    return post_acs(ent, response_b64, cookie=cookie, relay=relay, slug=slug)

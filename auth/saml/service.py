@@ -5,12 +5,18 @@ The ACS (`consume`) is the security boundary. In order:
 1. The org exists and has SSO configured and enabled, else 404. The caller's
    IP is rate-limited (core.auth.ratelimit) before any signature work.
 2. InResponseTo. An SP-initiated flow starts at `/login`, which stores the
-   AuthnRequest id (saml_request, ten-minute expiry). A response that names
-   a request id is accepted only if that id is stored, unexpired and unused;
-   it is consumed on first use, so a second response for the same request
-   is refused. A response with no InResponseTo is IdP-initiated: refused
-   unless the org set `saml.allow_idp_initiated` (off by default; login
-   CSRF is the attack it opens), and audited either way.
+   AuthnRequest id (saml_request, ten-minute expiry) AND hands the same id
+   to the browser in a cookie (core.auth.saml.router.REQUEST_COOKIE:
+   HttpOnly, Secure, SameSite=None, __Host- prefix, same expiry). A
+   response that names a request id is accepted only if the cookie the
+   browser sends names that same id (checked before any lookup), and the
+   id is stored, unexpired and unused; it is consumed on first use. So an
+   attacker cannot start /login himself, sign in at the IdP, and plant the
+   response in a victim's browser: the victim's browser carries no cookie
+   for the attacker's request. A response with no InResponseTo is
+   IdP-initiated: refused unless the org set `saml.allow_idp_initiated`
+   (off by default; login CSRF is the attack it opens), and audited either
+   way.
 3. python3-saml validates the response in strict mode, with the request id
    passed in so it checks the match too: signature of the assertion against
    the org's IdP certificate (SHA-1 refused unless the org opted in),
@@ -44,6 +50,7 @@ The ACS (`consume`) is the security boundary. In order:
    The tokens themselves never appear in a URL.
 """
 
+import hmac
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -135,9 +142,13 @@ async def _consume_request(org: Org, request_id: str) -> bool:
         return live > datetime.now(timezone.utc)
 
 
-async def login_redirect(org_slug: str, next_path: str | None = None) -> str:
-    """The IdP URL (HTTP-Redirect binding) carrying a fresh AuthnRequest,
-    whose id is remembered so the response can be pinned to it."""
+async def login_redirect(org_slug: str, next_path: str | None = None) -> tuple[str, str]:
+    """(IdP URL with a fresh AuthnRequest, that request's id).
+
+    The id is remembered server-side so the response can be pinned to it,
+    and the router puts the same id in the browser's cookie so the response
+    is also pinned to the browser that started the flow.
+    """
     org, saml = await _org_with_sso(org_slug)
     relay = cfg.safe_relay_path(next_path)
     auth = _auth(org.slug, saml)
@@ -146,7 +157,7 @@ async def login_redirect(org_slug: str, next_path: str | None = None) -> str:
     if not request_id:
         raise SamlError(status_code=500, detail="Could not build the sign-on request")
     await _remember_request(org, request_id)
-    return url
+    return url, request_id
 
 
 # ── assertion consumer ──────────────────────────────────────────────────
@@ -298,8 +309,17 @@ def _in_response_to(auth, response_b64: str) -> str | None:
     return OneLogin_Saml2_Response(auth.get_settings(), response_b64).get_in_response_to() or None
 
 
-async def consume(org_slug: str, post_data: dict[str, Any], ip: str | None = None) -> str:
-    """Validate a SAMLResponse for the org; returns the URL to send the browser to."""
+async def consume(
+    org_slug: str,
+    post_data: dict[str, Any],
+    ip: str | None = None,
+    bound_request_id: str | None = None,
+) -> str:
+    """Validate a SAMLResponse for the org; returns the URL to send the browser to.
+
+    `bound_request_id` is the request id the browser's cookie carries (None
+    when it sent none). An SP-initiated response must name exactly that id.
+    """
     org, saml = await _org_with_sso(org_slug)
     check_rate_limit(f"saml-acs:{ip or 'unknown'}", ACS_RATE_PER_MINUTE, 60)
     if "SAMLResponse" not in post_data:
@@ -316,9 +336,16 @@ async def consume(org_slug: str, post_data: dict[str, Any], ip: str | None = Non
         if not cfg.allows_idp_initiated(saml):
             raise await _refuse(401, org, None, "unsolicited (IdP-initiated) response refused: saml.allow_idp_initiated is off",
                                 ip, "Single sign-on must start from this application")
-    elif not await _consume_request(org, request_id):
-        raise await _refuse(401, org, None, f"unknown, expired or already used InResponseTo {request_id}", ip,
-                            "Single sign-on response rejected")
+    else:
+        # browser binding first, before any lookup: the response must answer
+        # the request THIS browser started, not one an attacker started
+        if not bound_request_id or not hmac.compare_digest(bound_request_id, request_id):
+            why = "no request cookie" if not bound_request_id else "the request cookie names another request"
+            raise await _refuse(401, org, None, f"InResponseTo {request_id} is not bound to this browser: {why}", ip,
+                                "Single sign-on must start from this browser")
+        if not await _consume_request(org, request_id):
+            raise await _refuse(401, org, None, f"unknown, expired or already used InResponseTo {request_id}", ip,
+                                "Single sign-on response rejected")
 
     try:
         auth.process_response(request_id=request_id)
@@ -363,9 +390,13 @@ async def consume(org_slug: str, post_data: dict[str, Any], ip: str | None = Non
             user = await _resolve_user(session, org, name_id, email)
             created = user is None
             if created:
+                # email_verified stays False: the org's IdP vouching for the
+                # address is not mailbox proof (any signed-in user can make an
+                # org and point it at an IdP they run). identity_source says
+                # who the account belongs to instead.
                 user = UserRecord(
                     id=str(uuid.uuid4()), email=email, name=display_name,
-                    auth_provider="saml", role="user", email_verified=True,
+                    auth_provider="saml", role="user", email_verified=False,
                     identity_source=org_identity_source(org.id),
                 )
                 session.add(user)

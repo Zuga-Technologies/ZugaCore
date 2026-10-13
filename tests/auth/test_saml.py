@@ -10,12 +10,15 @@ What is guarded here:
 
 * flag off -> the three routes are 404.
 * metadata names our entity id and ACS URL, both built from API_DOMAIN.
-* login redirects to the IdP with a SAMLRequest whose id is remembered;
-  `next` rides along only as a same-site path.
-* a response is accepted only when it answers a request this SP issued and
-  has not seen answered (InResponseTo pinned; unknown, expired and reused
-  ids are 401). IdP-initiated (unsolicited) responses are refused unless the
-  org opted in with saml.allow_idp_initiated; both outcomes are audited.
+* login redirects to the IdP with a SAMLRequest whose id is remembered and
+  handed to the browser in an HttpOnly/Secure/SameSite=None cookie; `next`
+  rides along only as a same-site path.
+* a response is accepted only when it answers a request this SP issued, the
+  browser's cookie names that same request, and the request has not been
+  answered (InResponseTo pinned to the store AND the browser; unknown,
+  expired, reused and other-browser ids are 401). IdP-initiated
+  (unsolicited) responses are refused unless the org opted in with
+  saml.allow_idp_initiated; both outcomes are audited.
 * a valid assertion creates the user, the org membership, the groups and the
   binding, then hands the browser a single-use handoff code (never a token).
 * bad signature, expired NotOnOrAfter, replayed assertion id, wrong
@@ -33,7 +36,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
 from ._samlidp import (
-    ACS, API, IDP_ENTITY, IDP_SSO, SLUG, SP_ENTITY, WEB, keypair, saml_response, sp_initiated_response, start_login,
+    ACS, API, IDP_ENTITY, IDP_SSO, REQUEST_COOKIE, SLUG, SP_ENTITY, WEB, cookie_header, keypair, post_acs,
+    saml_response, sp_initiated_response, sp_login, start_login,
 )
 
 
@@ -76,16 +80,14 @@ def sso(ent, idp, monkeypatch):
     return {"org": org, "minted": minted}
 
 
-def _post_acs(ent, saml_response_b64: str, relay: str | None = None, slug: str = SLUG):
-    data = {"SAMLResponse": saml_response_b64}
-    if relay is not None:
-        data["RelayState"] = relay
-    return ent.post(f"/api/auth/saml/{slug}/acs", data=data, follow_redirects=False)
+def _post_acs(ent, saml_response_b64: str, relay: str | None = None, slug: str = SLUG, cookie: str | None = None):
+    return post_acs(ent, saml_response_b64, cookie=cookie, relay=relay, slug=slug)
 
 
 def _acs(ent, idp, relay: str | None = None, **resp_kwargs):
-    """An SP-initiated sign-in: /login first, then a response answering that request."""
-    return _post_acs(ent, sp_initiated_response(ent, idp, **resp_kwargs), relay)
+    """An SP-initiated sign-in from one browser: /login (cookie + request id),
+    then a response answering that request, posted with that cookie."""
+    return sp_login(ent, idp, relay=relay, **resp_kwargs)
 
 
 def _audit_rows(db, kind="saml.acs"):
@@ -209,6 +211,12 @@ def test_login_redirects_to_the_idp_and_remembers_the_request(ent, sso, db):
 
     assert len(db.run_until_complete(_pending())) == 3
 
+    raw = next(h for h in r.headers.get_list("set-cookie") if h.startswith(REQUEST_COOKIE + "="))
+    attrs = raw.lower()
+    assert "httponly" in attrs and "secure" in attrs and "samesite=none" in attrs and "path=/" in attrs
+    assert "max-age=600" in attrs
+    assert raw.split("=", 1)[1].split(";", 1)[0] == db.run_until_complete(_pending())[-1].request_id
+
 
 # ── InResponseTo pinning ────────────────────────────────────────────────
 
@@ -222,26 +230,23 @@ def _assert_refused(r, db, status, reason_fragment):
 
 
 def test_response_must_answer_a_request_this_sp_issued(ent, sso, idp, db):
-    # a made-up request id
-    r = _post_acs(ent, saml_response(idp, in_response_to="_not-ours"))
+    # a made-up request id, even with a cookie that agrees with it
+    r = _post_acs(ent, saml_response(idp, in_response_to="_not-ours"), cookie="_not-ours")
     _assert_refused(r, db, 401, "unknown, expired or already used InResponseTo")
-    # a request id issued for ANOTHER org
+    # a request id issued for ANOTHER org, with that browser's own cookie
     rival = ent.post("/api/orgs", json={"name": "Rival", "slug": "rival"}, headers=_as("u2")).json()
     ent.patch(f"/api/orgs/{rival['id']}", json={"settings": {"saml": {"entity_id": IDP_ENTITY, "sso_url": IDP_SSO, "x509_cert": idp["cert"]}}}, headers=_as("u2"))
-    rid = start_login(ent, "rival")
-    r = _post_acs(ent, saml_response(idp, in_response_to=rid))
+    rid, cookie = start_login(ent, "rival")
+    r = _post_acs(ent, saml_response(idp, in_response_to=rid), cookie=cookie)
     _assert_refused(r, db, 401, "InResponseTo")
     assert sso["minted"] == []
 
 
 def test_a_request_id_is_single_use(ent, sso, idp, db):
-    resp = sp_initiated_response(ent, idp)
-    assert _post_acs(ent, resp).status_code == 303
-    r = _post_acs(ent, resp)
+    resp, cookie = sp_initiated_response(ent, idp)
+    assert _post_acs(ent, resp, cookie=cookie).status_code == 303
+    r = _post_acs(ent, resp, cookie=cookie)
     _assert_refused(r, db, 401, "already used")
-    # a NEW assertion answering the same consumed request is refused too
-    rid_reuse = parse_qs("")  # placeholder to keep the intent explicit
-    assert rid_reuse == {}
     assert len(sso["minted"]) == 1
 
 
@@ -249,16 +254,48 @@ def test_an_expired_request_id_is_refused(ent, sso, idp, db):
     from core.auth.saml.models import SamlRequest
     from core.database.session import get_session
 
-    rid = start_login(ent)
+    rid, cookie = start_login(ent)
 
     async def _expire():
         async with get_session() as s:
             await s.execute(update(SamlRequest).values(expires_at=datetime.now(timezone.utc) - timedelta(minutes=1)))
 
     db.run_until_complete(_expire())
-    r = _post_acs(ent, saml_response(idp, in_response_to=rid))
+    r = _post_acs(ent, saml_response(idp, in_response_to=rid), cookie=cookie)
     _assert_refused(r, db, 401, "expired")
     assert sso["minted"] == []
+
+
+def test_a_response_planted_in_another_browser_is_refused(ent, sso, idp, db):
+    """Login CSRF (review S4): the attacker starts /login himself, signs in
+    at the IdP as himself, and auto-submits the response from the victim's
+    browser. The victim's browser carries no cookie for that request (or its
+    own, different one), so the ACS refuses before any user lookup; the
+    victim's own login still completes afterwards."""
+    attacker_id, attacker_cookie = start_login(ent)
+    planted = saml_response(idp, name_id="attacker", attributes={"email": ["attacker@customer.example"]}, in_response_to=attacker_id)
+
+    # victim's browser: no request cookie at all
+    r = _post_acs(ent, planted)
+    row = _assert_refused(r, db, 401, "not bound to this browser")
+    assert "no request cookie" in row.detail and "must start from this browser" in r.json()["detail"]
+    # victim's browser: its own, different request in flight
+    victim_id, victim_cookie = start_login(ent)
+    r = _post_acs(ent, planted, cookie=victim_cookie)
+    row = _assert_refused(r, db, 401, "not bound to this browser")
+    assert "names another request" in row.detail
+    assert sso["minted"] == []
+    # the attacker's request was never consumed by those attempts, and the
+    # victim's own login is untouched
+    r = _post_acs(ent, saml_response(idp, name_id="victim", attributes={"email": ["victim@customer.example"]}, in_response_to=victim_id), cookie=victim_cookie)
+    assert r.status_code == 303, r.text
+    assert [m[2] for m in sso["minted"]] == ["victim"]
+    # and the browser's cookie is cleared by the successful ACS
+    cleared = next(h for h in r.headers.get_list("set-cookie") if h.startswith(REQUEST_COOKIE + "="))
+    assert 'max-age=0' in cleared.lower() or "expires=" in cleared.lower()
+    # the attacker, in his own browser, can still finish his own login
+    r = _post_acs(ent, planted, cookie=attacker_cookie)
+    assert r.status_code == 303
 
 
 def test_idp_initiated_is_refused_unless_the_org_opts_in(ent, sso, idp, db):
@@ -299,7 +336,8 @@ def test_valid_assertion_creates_user_membership_groups_and_session(ent, sso, id
 
     user = _user_by_email(db, "jane@customer.example")
     assert user is not None and user.auth_provider == "saml" and user.role == "user"
-    assert user.name == "Jane Doe" and user.email_verified is True
+    assert user.name == "Jane Doe"
+    assert user.email_verified is False  # the IdP vouching for the address is not mailbox proof (review N1)
     assert user.identity_source == f"org:{sso['org']['id']}"
     assert sso["minted"] == [(user.id, SLUG, "jane")]
     assert consume_code(q["code"][0]) == (f"access-{user.id}", f"refresh-{user.id}")
@@ -459,12 +497,11 @@ def test_another_orgs_idp_cannot_sign_in_to_this_orgs_users(ent, sso, idp, db):
     rival = ent.post("/api/orgs", json={"name": "Rival", "slug": "rival"}, headers=_as("u2")).json()
     ent.patch(f"/api/orgs/{rival['id']}", json={"settings": {"saml": {"entity_id": IDP_ENTITY, "sso_url": IDP_SSO, "x509_cert": idp["cert"]}}}, headers=_as("u2"))
     rival_acs = f"{API}/api/auth/saml/rival/acs"
-    resp = sp_initiated_response(ent, idp, slug="rival", audience=f"{API}/api/auth/saml/rival/metadata", recipient=rival_acs, destination=rival_acs)
-    r = _post_acs(ent, resp, slug="rival")
+    r = sp_login(ent, idp, slug="rival", audience=f"{API}/api/auth/saml/rival/metadata", recipient=rival_acs, destination=rival_acs)
     assert r.status_code == 403  # jane@customer.example exists (acme's) and rival is not its authority
     assert len(sso["minted"]) == 1
     # and acme's assertion posted to rival's ACS fails validation outright
-    r = _post_acs(ent, sp_initiated_response(ent, idp, slug="rival"), slug="rival")
+    r = sp_login(ent, idp, slug="rival")
     assert r.status_code == 401
 
 
@@ -473,13 +510,15 @@ def test_sha1_signatures_are_refused_unless_the_org_opts_in(ent, sso, idp, db):
     from onelogin.saml2.utils import OneLogin_Saml2_Utils
 
     def sha1_response():
-        unsigned = sp_initiated_response(ent, idp, sign=False)
+        unsigned, cookie = sp_initiated_response(ent, idp, sign=False)
         xml = base64.b64decode(unsigned).decode()
         start, end = xml.index("<saml:Assertion"), xml.index("</saml:Assertion>") + len("</saml:Assertion>")
         signed = OneLogin_Saml2_Utils.add_sign(xml[start:end], idp["key"], idp["cert"], sign_algorithm=C.RSA_SHA1, digest_algorithm=C.SHA1)
         signed = signed.decode() if isinstance(signed, bytes) else signed
-        return base64.b64encode((xml[:start] + signed + xml[end:]).encode()).decode()
+        return base64.b64encode((xml[:start] + signed + xml[end:]).encode()).decode(), cookie
 
-    assert _post_acs(ent, sha1_response()).status_code == 401
+    b64, cookie = sha1_response()
+    assert _post_acs(ent, b64, cookie=cookie).status_code == 401
     _set_saml(ent, sso["org"]["id"], allow_sha1=True)
-    assert _post_acs(ent, sha1_response()).status_code == 303
+    b64, cookie = sha1_response()
+    assert _post_acs(ent, b64, cookie=cookie).status_code == 303

@@ -33,13 +33,15 @@ def test_current_user_carries_email_verified_and_identity_source(db, add_user, m
     add_user("dev", "dev@example.com", auth_provider="dev", email_verified=False, supertokens_user_id="st-dev")
     add_user("prov", "p@customer.example", auth_provider="scim", email_verified=False,
              supertokens_user_id="st-prov", identity_source="org:abc")
+    # an org row whose users.email_verified somehow became True (reset-password
+    # path, old data) is still reported unverified: the org's word is not proof
     add_user("jit", "j@customer.example", auth_provider="saml", email_verified=True,
              supertokens_user_id="st-jit", identity_source="org:abc")
 
     expected = {
         "st-pw": (True, "local"), "st-pw-unv": (False, "local"), "st-g": (True, "google"),
         "st-gh": (True, "github"), "st-ms": (True, "microsoft"), "st-dev": (False, "local"),
-        "st-prov": (False, "org:abc"), "st-jit": (True, "org:abc"),
+        "st-prov": (False, "org:abc"), "st-jit": (False, "org:abc"),
     }
     for st_id, want in expected.items():
         user = _who_is(db, monkeypatch, st_id)
@@ -64,6 +66,24 @@ def test_me_and_the_login_user_dict_expose_the_fields(db):
     plain = CurrentUser(id="x", email="x@example.com")
     assert (plain.email_verified, plain.identity_source) == (False, "local")
     assert routes.UserResponse(id="x", email="x@example.com", role="user", is_admin=False).email_verified is False
+
+
+def test_org_provisioned_rows_are_written_and_reported_unverified(ent, db, monkeypatch):
+    """SCIM-created and SAML-JIT rows carry email_verified=False (review N1):
+    an org's IdP or SCIM vouching for an address is not mailbox proof."""
+    from core.auth.models import email_verified_for
+    from core.auth.repository import get_user_by_email
+
+    monkeypatch.setenv("API_DOMAIN", "https://api.test")
+    org = ent.post("/api/orgs", json={"name": "Acme", "slug": "acme"}, headers={"X-Test-User": "u1"}).json()
+    tok = ent.post(f"/api/orgs/{org['id']}/scim/token", headers={"X-Test-User": "u1"}).json()["token"]
+    r = ent.post("/scim/v2/Users", headers={"Authorization": f"Bearer {tok}"},
+                 json={"userName": "p@customer.example", "emails": [{"value": "p@customer.example", "primary": True}]})
+    assert r.status_code == 201
+    row = db.run_until_complete(get_user_by_email("p@customer.example"))
+    assert row.email_verified is False and row.identity_source == f"org:{org['id']}"
+    assert email_verified_for(True, row.identity_source) is False  # even if the row's flag were flipped
+    assert email_verified_for(True, None) is True and email_verified_for(True, "local") is True
 
 
 def test_provider_sign_ins_prove_the_mailbox_password_and_dev_do_not(db):
