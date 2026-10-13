@@ -64,3 +64,87 @@ def client(db, monkeypatch):
 
     with TestClient(app, raise_server_exceptions=True) as c:
         yield c
+
+
+# ── enterprise identity (Officium Lane E): orgs, MFA, SAML, SCIM ─────────
+
+
+@pytest.fixture
+def add_user(db):
+    """Insert one more users row (the `db` fixture seeds u1 and u2 only)."""
+    from core.auth.models import UserRecord
+    from core.database import session as db_session
+
+    def _add(user_id: str, email: str, **fields):
+        async def _go():
+            async with db_session.get_session() as s:
+                s.add(UserRecord(id=user_id, email=email, **fields))
+
+        db.run_until_complete(_go())
+
+    return _add
+
+
+@pytest.fixture
+def enterprise_app_factory(db):
+    """Build a FastAPI app with every enterprise router mounted and auth faked.
+
+    Mounting imports the enterprise models, so the fixture then re-runs
+    create_all on the test engine (idempotent) to add their tables. The flag
+    is NOT set here: `enterprise_app` sets it, and the flag-off tests build an
+    app through this factory with it unset.
+
+    Auth is faked at the dependency seam, not by a token: the X-Test-User
+    header names the users.id the request runs as (the row must exist), which
+    keeps SuperTokens out of these tests the way test_closed_doors does.
+    """
+
+    def _make():
+        from fastapi import FastAPI, HTTPException, Request
+
+        from core.auth import middleware
+        from core.auth.enterprise import include_enterprise_routes
+        from core.auth.models import CurrentUser
+        from core.auth.repository import get_user_by_id
+        from core.database import session as db_session
+        from core.database.base import Base
+
+        app = FastAPI()
+        include_enterprise_routes(app)
+        engine = db_session.get_engine()
+
+        async def _create_tables():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+
+        db.run_until_complete(_create_tables())
+
+        async def fake_user(request: Request) -> CurrentUser:
+            uid = request.headers.get("X-Test-User")
+            record = await get_user_by_id(uid) if uid else None
+            if record is None:
+                raise HTTPException(status_code=401, detail="Missing authorization header")
+            return CurrentUser(
+                id=record.id, email=record.email, role=record.role,
+                name=record.name, avatar_url=record.avatar_url,
+            )
+
+        app.dependency_overrides[middleware.get_current_user] = fake_user
+        return app
+
+    return _make
+
+
+@pytest.fixture
+def enterprise_app(enterprise_app_factory, monkeypatch):
+    monkeypatch.setenv("ZUGACORE_ENTERPRISE", "1")
+    return enterprise_app_factory()
+
+
+@pytest.fixture
+def ent(enterprise_app):
+    """TestClient on the enterprise app with ZUGACORE_ENTERPRISE=1."""
+    from fastapi.testclient import TestClient
+
+    with TestClient(enterprise_app, raise_server_exceptions=True) as c:
+        yield c

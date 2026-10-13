@@ -1070,6 +1070,8 @@ _USER_DEPENDENT_TABLES: tuple[str, ...] = (
     "life_xp_transactions",
     "meditation_sessions",
     "mood_entries",
+    "org_group_member",
+    "org_member",
     "spiritus_consents",
     "spiritus_zugabot_outbox",
     "subscription",

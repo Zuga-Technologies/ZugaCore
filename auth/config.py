@@ -91,3 +91,15 @@ def get_apple_private_key() -> str | None:
 
 def get_google_client_secret() -> str | None:
     return os.environ.get("GOOGLE_CLIENT_SECRET") or None
+
+
+# --- Enterprise identity (Officium) ---
+
+def get_enterprise_enabled() -> bool:
+    """ZUGACORE_ENTERPRISE=1 turns on organisations, groups, TOTP MFA, SAML and SCIM.
+
+    Off by default so ZugaPlatform's behaviour is unchanged. Read on every call
+    (never cached) so the flag can be flipped in a live process and in tests;
+    with it off, every enterprise route answers 404 as if it were not mounted.
+    """
+    return os.environ.get("ZUGACORE_ENTERPRISE", "").strip().lower() in ("1", "true", "yes")
