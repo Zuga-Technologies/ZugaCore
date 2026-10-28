@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Creates ZugaCore backend symlinks for a studio or ZugaApp repo.
+# Creates ZugaCore backend symlinks for a studio or ZugaPlatform repo.
 #
 # Usage:
 #   ../ZugaCore/scripts/setup-symlinks.sh          (from repo root)
@@ -64,7 +64,7 @@ create_link() {
     # Compute relative target from the link's parent directory so the
     # stored symlink is portable across machines (Buga desktop, Mac Mini,
     # Linux CI, fresh clones). Matches the `credits` symlink convention
-    # already tracked in ZugaApp. Python's os.path.relpath works
+    # already tracked in ZugaPlatform. Python's os.path.relpath works
     # identically on all three OSes — same dep already used by
     # vendor-core.sh for .gitmodules / .gitignore rewrites.
     local rel_target
@@ -74,7 +74,7 @@ create_link() {
         # Windows: mklink /d accepts relative paths; backslashes required.
         # NOTE: mklink.exe still needs admin or Developer Mode to create
         # new symlinks. If this fails, prefer the git-tracked symlink
-        # pattern (see ZugaApp's credits/lifecycle): git update-index
+        # pattern (see ZugaPlatform's credits/lifecycle): git update-index
         # --add --cacheinfo 120000,<hash>,<path> then git checkout.
         local win_link
         if command -v cygpath >/dev/null 2>&1; then

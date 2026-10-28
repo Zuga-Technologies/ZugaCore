@@ -2,7 +2,7 @@
 
 Studios don't import from here — the gateway is consumed via HTTP by
 browser-side callers (ZugaExtension, ZugaLife onboarding). The router is
-mounted into ZugaApp's FastAPI app at /api/ai/*.
+mounted into ZugaPlatform's FastAPI app at /api/ai/*.
 """
 
 from core.gateway.providers import (

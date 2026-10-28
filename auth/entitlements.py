@@ -16,7 +16,7 @@ from core.database.session import get_session
 def _default_apps() -> list[str]:
     """Apps auto-granted to every account on first login (host bundle).
 
-    Set ZUGA_DEFAULT_APPS=spiritus,health on the ZugaApp host so new web
+    Set ZUGA_DEFAULT_APPS=spiritus,health on the ZugaPlatform host so new web
     signups land with a non-empty portal.
     """
     raw = os.environ.get("ZUGA_DEFAULT_APPS", "").strip()
@@ -28,7 +28,7 @@ def _standalone_app_slug() -> str | None:
 
     Each standalone deploy (e.g. the Spiritus Play Store build's backend)
     sets ZUGA_APP_SLUG=spiritus so first login registers ownership and the
-    web portal embeds it afterward. Unset on the ZugaApp host.
+    web portal embeds it afterward. Unset on the ZugaPlatform host.
     """
     slug = os.environ.get("ZUGA_APP_SLUG", "").strip()
     return slug or None

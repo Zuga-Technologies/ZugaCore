@@ -20,7 +20,7 @@ def get_google_client_id() -> str | None:
 def get_auth_db_path() -> str:
     """Return the path to the shared auth database.
 
-    All services (ZugaApp, ZugaLife, etc.) should point to the same file
+    All services (ZugaPlatform, ZugaLife, etc.) should point to the same file
     so tokens created in one service are valid in all others.
     """
     if path := os.environ.get("AUTH_DB_PATH"):

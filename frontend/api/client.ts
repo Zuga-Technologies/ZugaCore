@@ -36,7 +36,7 @@ export function clearSession(): void {
   clearRefreshToken()
 }
 
-// Keys read by the login surfaces (ZugaApp LoginView, ZugaLife App.vue) to show
+// Keys read by the login surfaces (ZugaPlatform LoginView, ZugaLife App.vue) to show
 // a "session expired" message and return the user to where they were after they
 // sign back in. sessionStorage (not a query param) because Spiritus's catch-all
 // route drops unknown query strings on the redirect to '/'.

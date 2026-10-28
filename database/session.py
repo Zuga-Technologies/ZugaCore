@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from core.database.base import Base
 
 # Lazy-initialized by init_engine(). This lets any entry point
-# (ZugaApp, ZugaLife standalone, tests) provide its own database URL
+# (ZugaPlatform, ZugaLife standalone, tests) provide its own database URL
 # without a hard dependency on app.config at import time.
 _engine = None
 _async_session = None

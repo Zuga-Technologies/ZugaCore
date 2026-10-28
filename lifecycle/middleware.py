@@ -32,7 +32,7 @@ _in_flight = 0
 # BOTH /api/<studio>/health AND /api/health/live match correctly. The
 # previous substring match on "/health/" missed bare /health endpoints and
 # silently broke graceful drain during deploys for any studio using that
-# naming convention (ZugaAudio, ZugaImage, ZugaApp shield, etc.).
+# naming convention (ZugaAudio, ZugaImage, ZugaPlatform shield, etc.).
 _PASSTHROUGH_RE = re.compile(r"(^|/)(health|lifecycle)(/|$)")
 
 # Requests to these paths don't count as "real" activity for the idle-exit

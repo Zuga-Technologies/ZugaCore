@@ -6,7 +6,7 @@ User-facing:
   PUT    /api/theme/overrides/{scope}   → upsert override (create or update)
   DELETE /api/theme/overrides/{scope}   → remove override
 
-Service-to-service (Zugabot → ZugaApp):
+Service-to-service (Zugabot → ZugaPlatform):
   POST   /api/theme/internal/apply      → upsert override via service key
 """
 
@@ -247,7 +247,7 @@ async def delete_override(
     return {"status": "ok", "scope": scope}
 
 
-# ── Service-to-Service (Zugabot → ZugaApp) ──────────────────────
+# ── Service-to-Service (Zugabot → ZugaPlatform) ──────────────────────
 
 
 @router.post("/internal/apply", response_model=ThemeOverrideResponse)

@@ -1,5 +1,5 @@
 /*
- * ZugaApp Design Token Variables
+ * ZugaPlatform Design Token Variables
  *
  * All color tokens are defined as RGB channels (e.g. "245 158 11")
  * so Tailwind's opacity modifier syntax works: bg-accent/10 → rgb(var(--accent) / 0.1)
@@ -67,7 +67,7 @@
 
 /* ═══════════════════════════════════════════════
    PRESET: ZugaLife studio (rose coral / holistic-zen)
-   Operator decision (2026-05-04): ZugaLife differentiates from the ZugaApp
+   Operator decision (2026-05-04): ZugaLife differentiates from the ZugaPlatform
    product-shell acid-lime brand and adopts rose coral as its own studio
    accent — "holistic, natural, zen." Supersedes the prior 2026-05-03 lime
    inheritance and the original Bible §5.10 acc03 mint assignment.
@@ -78,7 +78,7 @@
    = AA fail — never use white text on the coral itself.
    The darker companion rose-600 accepts white text at 4.70:1 (AA) and is
    the safe choice for any UI surface where coral fails contrast.
-   Acid lime #a3e635 remains the ZugaApp product-shell brand — do NOT
+   Acid lime #a3e635 remains the ZugaPlatform product-shell brand — do NOT
    propagate coral outside the [data-theme="life"] scope.
    ═══════════════════════════════════════════════ */
 html[data-theme="life"] {
@@ -86,7 +86,7 @@ html[data-theme="life"] {
 
   /* ONLY override ZugaCore's --accent (RGB-triple). This is what Tailwind's
      bg-accent / text-accent classes inside Life consume. Do NOT bridge into
-     ZugaApp's --accent-brand* tokens — those are SHELL brand tokens that
+     ZugaPlatform's --accent-brand* tokens — those are SHELL brand tokens that
      drive auth forms, ChatPanel, focus outlines, etc. and must stay lime
      regardless of which studio is active. "JUST FOR LIFE" means: coral
      appears INSIDE the Life dashboard surface only, never in shell chrome. */

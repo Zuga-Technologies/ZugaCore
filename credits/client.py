@@ -1,7 +1,7 @@
 """Dual-mode ZugaTokens client for studios.
 
 Provides a unified interface for token tracking that works in both
-embedded mode (shared DB with ZugaApp) and standalone mode (HTTP calls).
+embedded mode (shared DB with ZugaPlatform) and standalone mode (HTTP calls).
 
 Usage:
     from core.credits.client import get_credit_client
@@ -84,7 +84,7 @@ class CreditClient(abc.ABC):
 class DirectCreditClient(CreditClient):
     """Shared DB mode — uses token wallet directly.
 
-    Used when running embedded inside ZugaApp (shared SQLite DB).
+    Used when running embedded inside ZugaPlatform (shared SQLite DB).
     """
 
     async def can_spend(self, user_id: str, email: str, estimated_tokens: float = 0) -> bool:
@@ -134,7 +134,7 @@ class DirectCreditClient(CreditClient):
 
 
 class HttpCreditClient(CreditClient):
-    """HTTP mode — calls ZugaApp's token API endpoints.
+    """HTTP mode — calls ZugaPlatform's token API endpoints.
 
     Used when running standalone (own process, own DB).
     """
@@ -233,7 +233,7 @@ class HttpCreditClient(CreditClient):
 
     @property
     def _fail_open(self) -> bool:
-        # Default CLOSED: if ZugaApp is unreachable, block AI calls rather
+        # Default CLOSED: if ZugaPlatform is unreachable, block AI calls rather
         # than serving them for free. Set CREDIT_FAIL_MODE=open in dev only.
         return os.environ.get("CREDIT_FAIL_MODE", "closed") == "open"
 
@@ -290,7 +290,7 @@ def get_credit_client() -> CreditClient:
 
     Detection order:
     1. ZUGAAPP_CREDITS_URL set → HTTP mode
-    2. DB engine initialized → Direct mode (embedded in ZugaApp)
+    2. DB engine initialized → Direct mode (embedded in ZugaPlatform)
     3. Neither → Null mode (logging only)
     """
     global _instance

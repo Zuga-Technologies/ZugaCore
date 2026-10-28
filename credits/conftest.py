@@ -1,7 +1,7 @@
 """Shared pytest fixtures for credits route tests.
 
 Tests must be run from `ZugaApp/backend/` so the `core.credits.*` imports
-resolve (ZugaCore is symlinked into ZugaApp as `backend/core/`).
+resolve (ZugaCore is symlinked into ZugaPlatform as `backend/core/`).
 
 Initializes the real `core.database.session` engine against an in-memory
 SQLite so routes + manager hit the same DB without any patching of

@@ -59,7 +59,7 @@ router = APIRouter(tags=["tokens"])
 # ── Service-to-service auth ─────────────────────────────────────────────
 
 def _verify_service_key(x_service_key: str = Header(alias="X-Service-Key")) -> str:
-    """Validate the shared service key for studio-to-ZugaApp token calls."""
+    """Validate the shared service key for studio-to-ZugaPlatform token calls."""
     expected = os.environ.get("STUDIO_SERVICE_KEY", "").strip()
     if not expected or x_service_key != expected:
         raise HTTPException(status_code=403, detail="Invalid service key")

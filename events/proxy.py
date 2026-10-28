@@ -2,7 +2,7 @@
 
 Studios call this to emit events. Auto-detects topology:
 
-- **In-process** (host environment, e.g. ZugaApp): dispatches via the host's
+- **In-process** (host environment, e.g. ZugaPlatform): dispatches via the host's
   ``core.events.bus.event_bus`` singleton — same path as before.
 - **Standalone** (e.g. ZugaLife on its own Railway service): falls back to
   HTTP POST against ``ZUGAAPP_EVENTS_URL`` with ``X-Studio-Secret`` header.
@@ -18,7 +18,7 @@ Caller pattern (replaces ``from core.events.bus import event_bus``):
 
 Env vars (only consulted in standalone fallback):
     ZUGAAPP_EVENTS_URL    default https://zugabot.ai/api/events/emit
-    WEBHOOK_STUDIO_SECRET shared secret with ZugaApp's /api/events/emit auth
+    WEBHOOK_STUDIO_SECRET shared secret with ZugaPlatform's /api/events/emit auth
 """
 
 import logging
