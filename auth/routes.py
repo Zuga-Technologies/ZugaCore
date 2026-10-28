@@ -311,6 +311,7 @@ async def _enqueue_access_request(email: str) -> None:
     friendly 'request received' message even if the notification path is broken.
     """
     position = 0
+    is_new = False
     try:
         from core.database.session import get_session
         from sqlalchemy import text
@@ -321,6 +322,7 @@ async def _enqueue_access_request(email: str) -> None:
             )
             existing = row.fetchone()
             if existing is None:
+                is_new = True
                 await session.execute(
                     text(
                         "INSERT INTO waitlist (email, status, source, created_at, updated_at) "
@@ -334,8 +336,12 @@ async def _enqueue_access_request(email: str) -> None:
         logger.error("[invite] waitlist insert failed for %s: %s", email, exc)
         return
 
+    # Only the first request for an address emails the admin; a repeat attempt
+    # must not re-send the Approve/Deny mail.
+    if not is_new:
+        return
     try:
-        from api.waitlist import _email_admin_waitlist
+        from api.platform.waitlist import _email_admin_waitlist
         await _email_admin_waitlist(email, position)
     except Exception as exc:
         logger.error("[invite] admin notify failed for %s: %s", email, exc)
