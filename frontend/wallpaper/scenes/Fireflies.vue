@@ -78,7 +78,7 @@ let bgGrad: CanvasGradient | null = null
 let bgGradFrame = 0
 const BG_REBUILD_EVERY = 32  // bg shifts very slowly — no need to rebuild often
 
-function buildBgGrad(ctx: CanvasRenderingContext2D, w: number, h: number, time: number) {
+function buildBgGrad(ctx: CanvasRenderingContext2D, _w: number, h: number, time: number) {
   // Forest-at-night palette: deep teal → near-black navy. Subtle warm wash near top.
   const t1 = (Math.sin(time * 0.05) + 1) / 2
   const g = ctx.createLinearGradient(0, 0, 0, h)

@@ -92,7 +92,7 @@ let auroraGrad: CanvasGradient | null = null
 let auroraGradFrame = 0
 const AURORA_REBUILD_EVERY = 8
 
-function buildAuroraGrad(ctx: CanvasRenderingContext2D, w: number, h: number, time: number) {
+function buildAuroraGrad(ctx: CanvasRenderingContext2D, _w: number, h: number, time: number) {
   const auroraY = h * 0.4 + Math.sin(time * 0.3) * 30
   const g = ctx.createLinearGradient(0, auroraY - 200, 0, auroraY + 200)
   g.addColorStop(0, 'rgba(56, 189, 248, 0)')

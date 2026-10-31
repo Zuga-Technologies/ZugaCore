@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch } from 'vue'
 
 const props = withDefaults(defineProps<{
   trigger?: boolean | number

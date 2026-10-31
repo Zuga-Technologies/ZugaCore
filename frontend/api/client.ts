@@ -1,6 +1,23 @@
 const TOKEN_KEY = 'zugaapp_token'
 const REFRESH_KEY = 'zugaapp_refresh'
 
+// In a Capacitor native app the web layer is served from localhost ON THE
+// DEVICE, so a relative '/api/...' hits the phone, not the server. Detect the
+// native runtime via the injected global (no @capacitor/core import, so this
+// shared module stays safe for ZugaApp's web build) and route API calls at the
+// real origin. On the web Capacitor is absent and paths stay same-origin.
+const NATIVE_API_ORIGIN = 'https://zugabot.ai'
+export function apiUrl(path: string): string {
+  if (typeof window !== 'undefined') {
+    const cap = (window as unknown as {
+      Capacitor?: { isNativePlatform?: () => boolean; getPlatform?: () => string }
+    }).Capacitor
+    const native = cap?.isNativePlatform?.() ?? (cap?.getPlatform?.() ? cap.getPlatform() !== 'web' : false)
+    if (native && path.startsWith('/api')) return NATIVE_API_ORIGIN + path
+  }
+  return path
+}
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
 }
@@ -116,7 +133,7 @@ export async function tryRefresh(): Promise<string | null> {
   }
 
   inFlightRefresh = (async () => {
-    const doFetch = () => fetch('/api/auth/session/refresh', {
+    const doFetch = () => fetch(apiUrl('/api/auth/session/refresh'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: refreshToken }),
@@ -196,13 +213,13 @@ async function rawFetch(method: string, path: string, body: unknown, token: stri
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   }
-  if (!timeoutMs) return fetch(path, opts)
+  if (!timeoutMs) return fetch(apiUrl(path), opts)
   // AbortSignal.timeout would be simpler but isn't safe to assume everywhere
   // this bundle runs (older embedded webviews) — build it by hand.
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(path, { ...opts, signal: controller.signal })
+    return await fetch(apiUrl(path), { ...opts, signal: controller.signal })
   } finally {
     clearTimeout(timer)
   }

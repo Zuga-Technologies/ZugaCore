@@ -4,6 +4,7 @@
  * Video files go in public/backgrounds/ as MP4.
  * Themes persist in localStorage under 'zugalife-bg-theme'.
  */
+import { apiUrl } from '../api/client'
 
 export type ThemeId =
   | 'none'
@@ -26,6 +27,14 @@ export interface ThemeDefinition {
   scene?: string
   overlay?: number      // dark overlay opacity (0-1) for bright scenes
   fallbackBg?: string   // CSS gradient fallback while scene mounts
+  /** MP4 video source path for video-background themes. */
+  video?: string
+  /** WebM/VP9 video source — preferred over MP4 when the browser supports it. */
+  videoWebm?: string
+  /** Still-frame poster shown when motion is suppressed (reduced-motion or gpu-lite). */
+  poster?: string
+  /** Playback rate for the video loop (default 0.5). */
+  speed?: number
 }
 
 export const THEMES: ThemeDefinition[] = [
@@ -186,7 +195,7 @@ export function saveTheme(id: ThemeId | string) {
   // across devices. Fire-and-forget — silent on network/auth failure
   // so anonymous + offline paths keep working off localStorage.
   try {
-    fetch('/api/auth/bg-theme-pref', {
+    fetch(apiUrl('/api/auth/bg-theme-pref'), {
       method: 'PATCH',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -199,7 +208,7 @@ export function saveTheme(id: ThemeId | string) {
 // reads getSavedTheme(). Silent on failure so anon visitors still render.
 export async function hydrateThemeFromServer(): Promise<void> {
   try {
-    const res = await fetch('/api/auth/bg-theme-pref', { credentials: 'include' })
+    const res = await fetch(apiUrl('/api/auth/bg-theme-pref'), { credentials: 'include' })
     if (!res.ok) return
     const data = await res.json()
     const theme = (data && typeof data.theme === 'string') ? data.theme : null
