@@ -14,11 +14,13 @@ Handles:
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 import stripe
 from fastapi import HTTPException, Request
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from core.credits.manager import (
     add_purchased_tokens,
@@ -55,9 +57,10 @@ def _get_webhook_secret() -> str:
 # ── Idempotency Guard ────────────────────────────────────────────────
 
 async def _already_processed(stripe_id: str, tx_type: str) -> bool:
-    """Check if a Stripe event has already been processed (idempotency guard).
+    """Check if a Stripe event has already been processed.
 
-    Prevents double-crediting when Stripe retries webhook delivery.
+    A fast path for ordinary retries, and it spares a Stripe API call. It cannot stop
+    two overlapping deliveries, which can both read "not yet": that is _credit_once.
     """
     if not stripe_id:
         return False
@@ -70,6 +73,28 @@ async def _already_processed(stripe_id: str, tx_type: str) -> bool:
             ).limit(1)
         )
         return result.scalar_one_or_none() is not None
+
+
+async def _credit_once(
+    stripe_id: str | None,
+    tx_type: str,
+    credit: Callable[[], Awaitable[dict]],
+) -> dict | None:
+    """Run a ledger-writing credit. Returns None if another delivery got there first.
+
+    The unique (stripe_id, type) index is what makes crediting exactly-once: the
+    wallet change and the ledger row commit together, so the loser of a race rolls
+    back both. A unique failure can also be two first-ever credits colliding on the
+    new wallet row, where nothing was processed and the payment still has to land.
+    So look again: only a ledger row for this event means duplicate. Anything else
+    re-raises into a 500, and Stripe redelivers.
+    """
+    try:
+        return await credit()
+    except IntegrityError:
+        if stripe_id and await _already_processed(stripe_id, tx_type):
+            return None
+        raise
 
 
 # ── Main Entry Point ─────────────────────────────────────────────────
@@ -195,7 +220,13 @@ async def _activate_subscription(session: dict, metadata: dict) -> dict:
             ))
 
     # Credit first cycle tokens
-    await add_subscription_tokens(user_id, tokens, stripe_id=stripe_sub_id)
+    credited = await _credit_once(
+        stripe_sub_id, "subscription",
+        lambda: add_subscription_tokens(user_id, tokens, stripe_id=stripe_sub_id),
+    )
+    if credited is None:
+        logger.info("Duplicate subscription webhook lost the race: %s", stripe_sub_id)
+        return {"status": "already_processed"}
 
     # Signup bonus — goes into purchased bucket (never expires)
     # Uses a derived stripe_id for idempotency so retries don't double-grant
@@ -205,7 +236,10 @@ async def _activate_subscription(session: dict, metadata: dict) -> dict:
         bonus_tokens = int(tokens * bonus_pct)
         bonus_stripe_id = f"bonus_{stripe_sub_id}" if stripe_sub_id else None
         if not bonus_stripe_id or not await _already_processed(bonus_stripe_id, "grant"):
-            await grant_tokens(user_id, bonus_tokens, reason="subscription_bonus", stripe_id=bonus_stripe_id)
+            await _credit_once(
+                bonus_stripe_id, "grant",
+                lambda: grant_tokens(user_id, bonus_tokens, reason="subscription_bonus", stripe_id=bonus_stripe_id),
+            )
             logger.info("Subscription bonus: user=%s bonus=%d", user_id, bonus_tokens)
         else:
             logger.info("Duplicate subscription bonus skipped: %s", bonus_stripe_id)
@@ -235,7 +269,13 @@ async def _credit_topup(session: dict, metadata: dict) -> dict:
         logger.info("Duplicate top-up webhook skipped: %s", payment_intent)
         return {"status": "already_processed"}
 
-    await add_purchased_tokens(user_id, tokens, stripe_id=payment_intent)
+    credited = await _credit_once(
+        payment_intent, "purchase",
+        lambda: add_purchased_tokens(user_id, tokens, stripe_id=payment_intent),
+    )
+    if credited is None:
+        logger.info("Duplicate top-up webhook lost the race: %s", payment_intent)
+        return {"status": "already_processed"}
 
     logger.info(
         "Top-up credited: user=%s pack=%s tokens=%d stripe_pi=%s",
@@ -297,7 +337,13 @@ async def _handle_invoice_paid(invoice: dict) -> dict:
         tier = sub.tier
 
     # Credit tokens for this cycle
-    await add_subscription_tokens(user_id, tokens_per_cycle, stripe_id=invoice_id)
+    credited = await _credit_once(
+        invoice_id, "subscription",
+        lambda: add_subscription_tokens(user_id, tokens_per_cycle, stripe_id=invoice_id),
+    )
+    if credited is None:
+        logger.info("Duplicate invoice webhook lost the race: %s", invoice_id)
+        return {"status": "already_processed"}
 
     logger.info("Subscription renewed: user=%s tier=%s tokens=%d", user_id, tier, tokens_per_cycle)
     return {"status": "subscription_renewed", "tokens": tokens_per_cycle}
@@ -442,12 +488,18 @@ async def _claw_back_for_charge(charge: dict, refund_fraction: float, idempotenc
     if tokens_to_claw_back <= 0:
         return {"status": "ignored", "reason": "zero tokens to claw back"}
 
-    result = await claw_back_purchased_tokens(
-        user_id=original.user_id,
-        tokens=tokens_to_claw_back,
-        stripe_id=idempotency_id,
-        reason=reason,
+    result = await _credit_once(
+        idempotency_id, "refund",
+        lambda: claw_back_purchased_tokens(
+            user_id=original.user_id,
+            tokens=tokens_to_claw_back,
+            stripe_id=idempotency_id,
+            reason=reason,
+        ),
     )
+    if result is None:
+        logger.info("Duplicate %s webhook lost the race: %s", reason, idempotency_id)
+        return {"status": "already_processed"}
     return {
         "status": reason,
         "user_id": original.user_id,
@@ -519,8 +571,8 @@ async def _handle_payment_intent_succeeded(payment_intent: dict) -> dict:
 
     Only acts on PaymentIntents we created for auto top-up (metadata
     type=topup, source=autotopup). Checkout-driven top-ups are credited by
-    checkout.session.completed; the shared 'purchase' idempotency key on the
-    PaymentIntent id makes a double-credit impossible even if both fire.
+    checkout.session.completed; both claim the same (PaymentIntent id, 'purchase')
+    ledger row, so only one credits even if they fire together.
     """
     metadata = payment_intent.get("metadata") or {}
     if metadata.get("type") != "topup" or metadata.get("source") != "autotopup":
@@ -535,7 +587,13 @@ async def _handle_payment_intent_succeeded(payment_intent: dict) -> dict:
         logger.info("Duplicate autotopup PI skipped: %s", pi_id)
         return {"status": "already_processed"}
     tokens = TOPUP_PACKS[pack]["tokens"]
-    await add_purchased_tokens(user_id, tokens, stripe_id=pi_id)
+    credited = await _credit_once(
+        pi_id, "purchase",
+        lambda: add_purchased_tokens(user_id, tokens, stripe_id=pi_id),
+    )
+    if credited is None:
+        logger.info("Duplicate autotopup PI lost the race: %s", pi_id)
+        return {"status": "already_processed"}
     logger.info("Auto top-up credited: user=%s pack=%s tokens=%d pi=%s", user_id, pack, tokens, pi_id)
     return {"status": "autotopup_credited", "pack": pack, "tokens": tokens}
 
