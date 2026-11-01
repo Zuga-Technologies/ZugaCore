@@ -12,10 +12,12 @@ Tables:
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database.base import Base, TimestampMixin
+
+STRIPE_IDEMPOTENCY_INDEX = "uq_token_transaction_stripe_id_type"
 
 
 # ── Raw Cost Audit Trail (existing, extended) ─────────────────────────
@@ -101,9 +103,25 @@ class TokenTransaction(Base):
         expire        — Subscription rollover expiry
         grant         — Admin-granted bonus tokens
         refund        — Tokens returned (Stripe refund or error rollback)
+
+    A Stripe id can appear once per type. The balance change and this row commit
+    together, so when two deliveries of one event race, the loser's whole
+    transaction rolls back and the wallet moves once. Rows with no stripe_id (every
+    spend) are outside the index and cost it nothing. Existing databases get the
+    index from credits/migrations.py, because create_all skips existing tables.
     """
 
     __tablename__ = "token_transaction"
+    __table_args__ = (
+        Index(
+            STRIPE_IDEMPOTENCY_INDEX,
+            "stripe_id",
+            "type",
+            unique=True,
+            sqlite_where=text("stripe_id IS NOT NULL"),
+            postgresql_where=text("stripe_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(255), index=True)

@@ -66,6 +66,9 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         # Auto-migrate: add columns that exist in models but not in DB
         await conn.run_sync(_add_missing_columns, Base)
+        if "token_transaction" in Base.metadata.tables:
+            from core.credits.migrations import ensure_stripe_idempotency_index
+            await conn.run_sync(ensure_stripe_idempotency_index)
 
 
 def _add_missing_columns(conn, base) -> None:  # type: ignore[no-untyped-def]

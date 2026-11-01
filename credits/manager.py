@@ -155,10 +155,14 @@ async def _get_or_create_balance(
 
     # Expire rollover tokens whose 31-day deadline has passed.
     # Applies to active + canceled subscribers alike — spec is calendar-only.
+    # SQLite hands DateTime(timezone=True) back naive; it was stored as UTC.
+    rollover_exp = balance.sub_rollover_exp
+    if rollover_exp is not None and rollover_exp.tzinfo is None:
+        rollover_exp = rollover_exp.replace(tzinfo=timezone.utc)
     if (
         balance.sub_rollover > 0
-        and balance.sub_rollover_exp is not None
-        and balance.sub_rollover_exp < datetime.now(timezone.utc)
+        and rollover_exp is not None
+        and rollover_exp < datetime.now(timezone.utc)
     ):
         expired_amount = balance.sub_rollover
         balance.sub_rollover = 0
