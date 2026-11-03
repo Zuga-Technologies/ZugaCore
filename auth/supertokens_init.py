@@ -202,7 +202,7 @@ def init_supertokens() -> None:
 
     init(
         app_info=InputAppInfo(
-            app_name="ZugaApp",
+            app_name="Zugabot",
             api_domain=api_domain,
             website_domain=website_domain,
             api_base_path="/api/auth/st",  # SuperTokens internal routes (not our custom ones)

@@ -19,7 +19,7 @@ def _get_resend_api_key() -> str | None:
 
 
 def _get_from_address() -> str:
-    return os.environ.get("EMAIL_FROM", "ZugaApp <noreply@zugabot.ai>")
+    return os.environ.get("EMAIL_FROM", "Zugabot <noreply@zugabot.ai>")
 
 
 _BRAND_LOGO_URL = "https://zugabot.ai/zugabot-mark.svg"
@@ -164,13 +164,13 @@ async def send_verification_email(email: str, token: str) -> None:
 
     html = _email_template(
         title="Verify your email",
-        body="Welcome to ZugaApp. Tap the button below to verify your email address and activate your account.",
+        body="Welcome to Zugabot. Tap the button below to verify your email address and activate your account.",
         button_text="Verify my email",
         button_link=link,
         footer="This link expires in 24 hours. If you didn't create an account, you can ignore this email.",
     )
 
-    await _send(email, "Verify your ZugaApp account", html)
+    await _send(email, "Verify your Zugabot account", html)
 
 
 async def send_reset_email(email: str, token: str) -> None:
@@ -180,13 +180,13 @@ async def send_reset_email(email: str, token: str) -> None:
 
     html = _email_template(
         title="Reset your password",
-        body="We received a request to reset your ZugaApp password. Tap the button below to choose a new one.",
+        body="We received a request to reset your Zugabot password. Tap the button below to choose a new one.",
         button_text="Reset my password",
         button_link=link,
         footer="This link expires in 1 hour. If you didn't request this, you can safely ignore this email.",
     )
 
-    await _send(email, "Reset your ZugaApp password", html)
+    await _send(email, "Reset your Zugabot password", html)
 
 
 async def _send(to: str, subject: str, html: str) -> None:
